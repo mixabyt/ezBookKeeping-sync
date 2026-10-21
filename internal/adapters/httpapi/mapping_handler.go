@@ -18,22 +18,25 @@ type UnmappedKeyDTO struct {
 	Direction  string `json:"direction"`   // 'expense' | 'income'
 	SampleDesc string `json:"sample_desc"` // опис однієї з транзакцій — щоб зрозуміти, що це
 	Hits       int    `json:"hits"`
-	FirstSeen  string `json:"first_seen"`
-	LastSeen   string `json:"last_seen"`
-	Resolved   bool   `json:"resolved"` // правило вже є, показуємо як історію
+	// WaitingJobs — скільки транзакцій зараз чекають саме на цей ключ
+	WaitingJobs int    `json:"waiting_jobs"`
+	FirstSeen   string `json:"first_seen"`
+	LastSeen    string `json:"last_seen"`
+	Resolved    bool   `json:"resolved"` // правило вже є, показуємо як історію
 }
 
 func unmappedToDTO(key domain.UnmappedKey) UnmappedKeyDTO {
 	return UnmappedKeyDTO{
-		Source:     string(key.Source),
-		KeyType:    string(key.KeyType),
-		Key:        key.Key,
-		Direction:  string(key.Direction),
-		SampleDesc: key.SampleDesc,
-		Hits:       key.Hits,
-		FirstSeen:  key.FirstSeen.Format(time.RFC3339),
-		LastSeen:   key.LastSeen.Format(time.RFC3339),
-		Resolved:   key.Resolved,
+		Source:      string(key.Source),
+		KeyType:     string(key.KeyType),
+		Key:         key.Key,
+		Direction:   string(key.Direction),
+		SampleDesc:  key.SampleDesc,
+		Hits:        key.Hits,
+		WaitingJobs: key.WaitingJobs,
+		FirstSeen:   key.FirstSeen.Format(time.RFC3339),
+		LastSeen:    key.LastSeen.Format(time.RFC3339),
+		Resolved:    key.Resolved,
 	}
 }
 
@@ -115,7 +118,7 @@ func (s *Server) createRule() gin.HandlerFunc {
 			mccTo = *req.MCCTo
 		}
 
-		rule, err := s.mappingService.CreateRule(c.Request.Context(), domain.MCCCategoryRule{
+		rule, queued, err := s.mappingService.CreateRule(c.Request.Context(), domain.MCCCategoryRule{
 			MCCFrom:       req.MCCFrom,
 			MCCTo:         mccTo,
 			Direction:     domain.Direction(req.Direction),
@@ -133,9 +136,9 @@ func (s *Server) createRule() gin.HandlerFunc {
 
 		logctx.From(c.Request.Context()).Info("створено правило",
 			"id", rule.ID, "mcc", rule.MCCFrom, "mcc_to", rule.MCCTo,
-			"direction", rule.Direction, "category_id", rule.EzbCategoryID)
+			"direction", rule.Direction, "category_id", rule.EzbCategoryID, "queued", queued)
 
-		s.respondCreated(c, "", RuleDTO{
+		s.respondCreated(c, "", gin.H{"rule": RuleDTO{
 			ID:            rule.ID,
 			MCCFrom:       rule.MCCFrom,
 			MCCTo:         rule.MCCTo,
@@ -144,7 +147,7 @@ func (s *Server) createRule() gin.HandlerFunc {
 			EzbCategoryID: rule.EzbCategoryID,
 			Enabled:       rule.Enabled,
 			Note:          rule.Note,
-		})
+		}, "queued": queued})
 	}
 }
 
@@ -193,5 +196,110 @@ func (s *Server) ezCategories() gin.HandlerFunc {
 			})
 		}
 		s.respondOK(c, gin.H{"items": items, "count": len(items)})
+	}
+}
+
+// EzAccountDTO — рахунок ezBookkeeping для випадайки в UI.
+type EzAccountDTO struct {
+	ID         string `json:"id"` // це значення йде в ezb_account_id мапінгу
+	Name       string `json:"name"`
+	ParentName string `json:"parent_name"`
+	Currency   string `json:"currency"`
+}
+
+// ezAccounts — GET /api/accounts: довідник рахунків ezBookkeeping (ключ лишається на сервері).
+func (s *Server) ezAccounts() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		accounts, err := s.mappingService.EzAccounts(c.Request.Context())
+		if err != nil {
+			logctx.From(c.Request.Context()).Error("не вдалося отримати рахунки ezBookkeeping", "err", err)
+			s.respondError(c, err)
+			return
+		}
+
+		items := make([]EzAccountDTO, 0, len(accounts))
+		for _, a := range accounts {
+			items = append(items, EzAccountDTO{ID: a.ID, Name: a.Name, ParentName: a.ParentName, Currency: a.Currency})
+		}
+		s.respondOK(c, gin.H{"items": items, "count": len(items)})
+	}
+}
+
+// WaitingAccountDTO — банківський рахунок без мапінгу, що блокує транзакції.
+type WaitingAccountDTO struct {
+	Source        string `json:"source"`
+	BankAccountID string `json:"bank_account_id"`
+	WaitingJobs   int    `json:"waiting_jobs"`
+	SampleDesc    string `json:"sample_desc"`
+}
+
+// unmappedAccounts — GET /api/unmapped-accounts
+func (s *Server) unmappedAccounts() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		waiting, err := s.mappingService.WaitingAccounts(c.Request.Context())
+		if err != nil {
+			logctx.From(c.Request.Context()).Error("не вдалося отримати незамаплені рахунки", "err", err)
+			s.respondError(c, err)
+			return
+		}
+
+		items := make([]WaitingAccountDTO, 0, len(waiting))
+		for _, w := range waiting {
+			items = append(items, WaitingAccountDTO{
+				Source:        string(w.Source),
+				BankAccountID: w.BankAccountID,
+				WaitingJobs:   w.WaitingJobs,
+				SampleDesc:    w.SampleDesc,
+			})
+		}
+		s.respondOK(c, gin.H{"items": items, "count": len(items)})
+	}
+}
+
+// CreateAccountMappingRequest — тіло POST /api/account-mappings.
+type CreateAccountMappingRequest struct {
+	Source        string `json:"source" binding:"required"`
+	BankAccountID string `json:"bank_account_id" binding:"required"`
+	EzbAccountID  string `json:"ezb_account_id" binding:"required"`
+	Name          string `json:"name"`
+}
+
+// createAccountMapping — POST /api/account-mappings: банківський рахунок → рахунок ezBookkeeping.
+// Повторний запит для того самого рахунку перезаписує мапінг — так виправляється помилковий вибір.
+func (s *Server) createAccountMapping() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req CreateAccountMappingRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			s.respondError(c, err)
+			return
+		}
+
+		mapping := domain.AccountMapping{
+			Source:        domain.Source(req.Source),
+			BankAccountID: req.BankAccountID,
+			EzbAccountID:  req.EzbAccountID,
+			Name:          req.Name,
+		}
+		queued, err := s.mappingService.CreateAccountMapping(c.Request.Context(), mapping)
+		if err != nil {
+			logctx.From(c.Request.Context()).Warn("не вдалося зберегти мапінг рахунку",
+				"source", req.Source, "bank_account_id", req.BankAccountID, "err", err)
+			s.respondError(c, err)
+			return
+		}
+
+		logctx.From(c.Request.Context()).Info("збережено мапінг рахунку",
+			"source", req.Source, "bank_account_id", req.BankAccountID,
+			"ezb_account_id", req.EzbAccountID, "queued", queued)
+
+		s.respondCreated(c, "", gin.H{
+			"mapping": gin.H{
+				"source":          req.Source,
+				"bank_account_id": req.BankAccountID,
+				"ezb_account_id":  req.EzbAccountID,
+				"name":            req.Name,
+			},
+			"queued": queued,
+		})
 	}
 }

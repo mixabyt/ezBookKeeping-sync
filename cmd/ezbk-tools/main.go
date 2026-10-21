@@ -8,7 +8,6 @@ import (
 	"ezbkTools/internal/adapters/sqlite"
 	"ezbkTools/internal/app"
 	"ezbkTools/internal/config"
-	"ezbkTools/internal/domain"
 	"log"
 	"log/slog"
 	"net/http"
@@ -41,22 +40,17 @@ func main() {
 
 	jobs := sqlite.NewJob(db)
 	categories := sqlite.NewCategory(db)
+	accounts := sqlite.NewAccount(db)
 
-	//categories := sql.
 	ezClient := ezbookkeeping.NewEzBookkeepingClient(cfg.EzBookKeepingKey, cfg.EzBookKeepingBaseURL)
 
-	syncService := app.NewSyncService(
-		jobs,
-		ezClient,
-		categories,
-		domain.Defaults{
-			ExpenseCategoryID: cfg.DefaultExpenseCategoryID,
-			IncomeCategoryID:  cfg.DefaultIncomeCategoryID,
-			SourceAccountID:   cfg.DefaultSourceAccountID,
-		},
-	)
+	syncService := app.NewSyncService(jobs, ezClient, categories, accounts)
 	worker := app.NewWorker(jobs, syncService)
-	srv := httpapi.NewServer(syncService, app.NewMappingService(categories, ezClient), httpapi.AuthConfig{
+
+	// syncService — він же JobWaker: після нового мапінгу будить воркер
+	mappingService := app.NewMappingService(categories, accounts, ezClient, jobs, syncService)
+
+	srv := httpapi.NewServer(syncService, mappingService, httpapi.AuthConfig{
 		Login:        cfg.AuthLogin,
 		PasswordHash: cfg.AuthPasswordHash,
 		Secret:       cfg.AuthSecret,

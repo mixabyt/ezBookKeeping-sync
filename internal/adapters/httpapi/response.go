@@ -89,7 +89,8 @@ func classifyError(err error) (int, string) {
 	case errors.Is(err, errBadKeyType), errors.Is(err, errBadLimit), errors.Is(err, errBadKind),
 		errors.Is(err, domain.ErrInvalidMCCRange),
 		errors.Is(err, domain.ErrInvalidDirection),
-		errors.Is(err, domain.ErrEmptyCategory):
+		errors.Is(err, domain.ErrEmptyCategory),
+		errors.Is(err, domain.ErrInvalidAccountMapping):
 		return http.StatusBadRequest, codeValidationError
 	case errors.Is(err, app.ErrRuleExists):
 		return http.StatusConflict, codeConflict

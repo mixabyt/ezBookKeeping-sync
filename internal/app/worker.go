@@ -29,6 +29,7 @@ func (w *Worker) Run(ctx context.Context) {
 	ticker := time.NewTicker(Delay)
 	for {
 		w.drain(ctx)
+		w.drainWaiting(ctx)
 		select {
 		case <-ctx.Done():
 			return
@@ -50,6 +51,31 @@ func (w *Worker) drain(ctx context.Context) {
 				return
 			}
 			w.handle(ctx, &job)
+		}
+		if len(jobs) < FetchLimit {
+			return
+		}
+	}
+}
+
+// drainWaiting перебирає джоби, що чекали мапінгу. На відміну від drain, їх набір
+// після обробки не обовʼязково зменшується (без мапінгу джоба лишається waiting),
+// тому йдемо курсором за id — інакше при 50+ незамаплених джобах прохід або
+// зациклився б на тих самих 50, або ніколи не дійшов би до 51-ї.
+func (w *Worker) drainWaiting(ctx context.Context) {
+	var afterID int64
+	for ctx.Err() == nil {
+		jobs, err := w.jobs.FetchWaiting(ctx, afterID, FetchLimit)
+		if err != nil {
+			logctx.From(ctx).Error("fetch waiting jobs", "err", err)
+			return
+		}
+		for _, job := range jobs {
+			if ctx.Err() != nil {
+				return
+			}
+			w.handle(ctx, &job)
+			afterID = job.ID
 		}
 		if len(jobs) < FetchLimit {
 			return

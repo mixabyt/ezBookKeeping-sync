@@ -112,26 +112,11 @@ type UnmappedKey struct {
 	FirstSeen  time.Time
 	LastSeen   time.Time
 
+	// WaitingJobs — скільки транзакцій зараз заблоковано цим ключем (status=waiting_mapping).
+	WaitingJobs int
+
 	// Resolved — чи зʼявилося відтоді правило для цього ключа.
 	// Рядки з unmapped_keys не видаляються, тому без цієї ознаки список
 	// ніколи б не порожнів: він показує історію, а не лише борг.
 	Resolved bool
-}
-
-// Defaults — чим заповнювати транзакцію, коли мапінгу немає: категорія, коли жодне
-// правило в mcc_category_rules не підійшло, і рахунок, коли немає рядка в account_mappings.
-// Беруться з конфігу: ID специфічні для інстансу ezBookkeeping.
-// Порожнє значення означає «дефолту немає» — тоді транзакцію не записуємо.
-type Defaults struct {
-	ExpenseCategoryID string
-	IncomeCategoryID  string
-	SourceAccountID   string
-}
-
-// CategoryFor — дефолтна категорія для напрямку руху грошей.
-func (d Defaults) CategoryFor(direction Direction) string {
-	if direction == DirectionIncome {
-		return d.IncomeCategoryID
-	}
-	return d.ExpenseCategoryID
 }

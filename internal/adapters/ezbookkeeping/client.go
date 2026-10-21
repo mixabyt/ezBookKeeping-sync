@@ -167,3 +167,35 @@ func kindFromType(t dto.TransactionCategoryType) domain.EzCategoryKind {
 		return domain.EzCategoryExpense
 	}
 }
+
+// Accounts віддає рахунки у плоскому вигляді. Рахунок із субрахунками сам по собі
+// транзакцію не приймає — вказується субрахунок, тому розгортаємо так само, як категорії.
+func (c *Client) Accounts(ctx context.Context) ([]domain.EzAccount, error) {
+	var list []dto.AccountInfoResponse
+	if err := c.do(ctx, http.MethodGet, getAccounts, nil, &list); err != nil {
+		return nil, fmt.Errorf("list accounts: %w", err)
+	}
+
+	accounts := make([]domain.EzAccount, 0, len(list))
+	for _, account := range list {
+		if len(account.SubAccounts) == 0 {
+			accounts = append(accounts, domain.EzAccount{
+				ID:       account.ID,
+				Name:     account.Name,
+				Currency: account.Currency,
+				Hidden:   account.Hidden,
+			})
+			continue
+		}
+		for _, sub := range account.SubAccounts {
+			accounts = append(accounts, domain.EzAccount{
+				ID:         sub.ID,
+				Name:       sub.Name,
+				ParentName: account.Name,
+				Currency:   sub.Currency,
+				Hidden:     sub.Hidden || account.Hidden,
+			})
+		}
+	}
+	return accounts, nil
+}

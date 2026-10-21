@@ -73,6 +73,9 @@ func (s *Server) init() {
 	secured.GET("/unmapped", s.unmappedKeys())
 	secured.POST("/rules", s.createRule())
 	secured.GET("/categories", s.ezCategories())
+	secured.GET("/accounts", s.ezAccounts())
+	secured.GET("/unmapped-accounts", s.unmappedAccounts())
+	secured.POST("/account-mappings", s.createAccountMapping())
 
 	// усе інше — статика PWA
 	s.router.NoRoute(s.serveWeb())

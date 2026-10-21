@@ -7,30 +7,36 @@ import (
 	"ezbkTools/internal/platform/logctx"
 	"fmt"
 	"strconv"
+	"strings"
+)
+
+// ErrNoCategoryRule / ErrNoAccountMapping — не збій обробки, а «чекаємо людину»:
+// джоба переходить у waiting_mapping і рушить далі, щойно мапінг зʼявиться.
+var (
+	ErrNoCategoryRule   = errors.New("немає правила категорії")
+	ErrNoAccountMapping = errors.New("немає мапінгу рахунку")
 )
 
 type SyncService struct {
 	jobs          JobRepository
 	categories    CategoryRepository
+	accounts      AccountRepository
 	ezBookKeeping Bookkeeper
-	defaults      domain.Defaults
 	wakeUp        chan struct{}
 }
 
-// categories CategoryRepository, ezBookKeeping Bookkeeper
-// categories: categories, ezBookKeeping: ezBookKeeping
 func NewSyncService(
 	jobs JobRepository,
 	book Bookkeeper,
 	categories CategoryRepository,
-	defaults domain.Defaults,
+	accounts AccountRepository,
 ) *SyncService {
 	return &SyncService{
 		jobs:          jobs,
 		wakeUp:        make(chan struct{}, 1),
 		ezBookKeeping: book,
 		categories:    categories,
-		defaults:      defaults,
+		accounts:      accounts,
 	}
 }
 
@@ -49,39 +55,68 @@ func (s *SyncService) Enqueue(ctx context.Context, tx *domain.BankTransaction) e
 		return err
 	}
 	logctx.From(ctx).Info("Створено job", "tx", tx.ID)
+	s.Wake()
+	return nil
+}
+
+// Wake будить воркер. Канал з буфером 1 і неблокуюча відправка: кілька сигналів
+// поспіль зливаються в один — воркер однаково перебере всі джоби за прохід.
+func (s *SyncService) Wake() {
 	select {
 	case s.wakeUp <- struct{}{}:
-		logctx.From(ctx).Info("Надіслано сигнал")
 	default:
 	}
-	return nil
 }
 
 func (s *SyncService) WakesUp() <-chan struct{} {
 	return s.wakeUp
 }
 
-// Process — викликає воркер для кожної pending-джоби.
+// Process — викликає воркер для pending- і waiting_mapping-джоб.
+//
+// Транзакція йде в ezBookkeeping лише коли відомі і категорія, і рахунок. Обидва
+// перевіряються за один прохід, щоб у причині очікування одразу було все, чого бракує,
+// а не "домапив категорію → тепер виявилось, що й рахунку немає".
 func (s *SyncService) Process(ctx context.Context, job *domain.Job) error {
-	categoryID, err := s.categoryIDFor(ctx, &job.Tx)
-	if err != nil {
-		logctx.From(ctx).Error("не вдалося визначити категорію", "job", job.ID, "err", err)
-		return errors.Join(
-			s.jobs.MarkFailed(ctx, job.ID, err),
-			err,
-		)
+	tx := &job.Tx
+	categoryID, catErr := s.categoryIDFor(ctx, tx)
+	accountID, accErr := s.accountIDFor(ctx, tx)
+
+	var missing []string
+	for _, err := range []error{catErr, accErr} {
+		switch {
+		case err == nil:
+		case errors.Is(err, ErrNoCategoryRule), errors.Is(err, ErrNoAccountMapping):
+			missing = append(missing, err.Error())
+		default:
+			// справжній збій (БД тощо) — це не очікування людини
+			logctx.From(ctx).Error("не вдалося підготувати джобу", "job", job.ID, "err", err)
+			return errors.Join(s.jobs.MarkFailed(ctx, job.ID, err), err)
+		}
 	}
 
-	accountID, err := s.accountIDFor(ctx, &job.Tx)
-	if err != nil {
-		logctx.From(ctx).Error("не вдалося визначити рахунок", "job", job.ID, "err", err)
-		return errors.Join(
-			s.jobs.MarkFailed(ctx, job.ID, err),
-			err,
-		)
+	if len(missing) > 0 {
+		firstTime := job.Status == domain.JobPending
+		// hits у unmapped_keys рахує транзакції, а не спроби: waiting-джоби
+		// перевіряються на кожному тіку, і без цієї умови лічильник ріс би безкінечно
+		if firstTime && errors.Is(catErr, ErrNoCategoryRule) {
+			s.trackUnmapped(ctx, domain.UnmappedKey{
+				Source:     tx.Source,
+				KeyType:    domain.KeyMCC,
+				Key:        strconv.Itoa(tx.MCC),
+				Direction:  tx.Direction(),
+				SampleDesc: tx.Description,
+			})
+		}
+
+		reason := strings.Join(missing, "; ")
+		if firstTime {
+			logctx.From(ctx).Warn("джоба чекає мапінгу", "job", job.ID, "tx", tx.ID, "reason", reason)
+		}
+		return s.jobs.MarkWaiting(ctx, job.ID, reason)
 	}
 
-	err = s.ezBookKeeping.AddTransaction(ctx, &job.Tx, categoryID, accountID)
+	err := s.ezBookKeeping.AddTransaction(ctx, tx, categoryID, accountID)
 	if err != nil {
 		return errors.Join(
 			s.jobs.MarkFailed(ctx, job.ID, err),
@@ -91,48 +126,29 @@ func (s *SyncService) Process(ctx context.Context, job *domain.Job) error {
 	return s.jobs.MarkDone(ctx, job.ID)
 }
 
-// categoryIDFor — категорія за правилом MCC, а якщо правила немає — дефолт за напрямком.
-// Без дефолту транзакцію не записуємо: краще failed-джоба, ніж запис у випадкову категорію.
+// categoryIDFor — категорія за правилом MCC. Дефолту немає навмисно: транзакція
+// в "Іншому" — це помилка, яку потім доводиться виправляти руками в ezBookkeeping.
 func (s *SyncService) categoryIDFor(ctx context.Context, tx *domain.BankTransaction) (string, error) {
 	rule, err := s.categories.EzCategoryRuleByMCC(ctx, tx.MCC)
 	if err != nil {
 		return "", err
 	}
-	if rule != nil {
-		return rule.EzbCategoryID, nil
+	if rule == nil {
+		return "", fmt.Errorf("%w для MCC %d (%s)", ErrNoCategoryRule, tx.MCC, tx.Direction())
 	}
-
-	categoryID := s.defaults.CategoryFor(tx.Direction())
-	if categoryID == "" {
-		return "", fmt.Errorf(
-			"немає правила для MCC %d і не налаштована дефолтна категорія для %s",
-			tx.MCC, tx.Direction(),
-		)
-	}
-
-	s.trackUnmapped(ctx, domain.UnmappedKey{
-		Source:     tx.Source,
-		KeyType:    domain.KeyMCC,
-		Key:        strconv.Itoa(tx.MCC),
-		Direction:  tx.Direction(),
-		SampleDesc: tx.Description,
-	})
-
-	logctx.From(ctx).Warn(
-		"правила для MCC немає, беремо дефолтну категорію",
-		"mcc", tx.MCC, "direction", tx.Direction(), "category_id", categoryID,
-	)
-	return categoryID, nil
+	return rule.EzbCategoryID, nil
 }
 
-// accountIDFor — рахунок ezBookkeeping для банківського рахунку транзакції.
-// TODO: мапінг account_mappings (source + bank_account_id → ezb_account_id);
-// поки один рахунок на все — дефолт з конфігу.
-func (s *SyncService) accountIDFor(_ context.Context, tx *domain.BankTransaction) (string, error) {
-	if s.defaults.SourceAccountID == "" {
-		return "", fmt.Errorf("не налаштований дефолтний рахунок для %s/%s", tx.Source, tx.AccountID)
+// accountIDFor — рахунок ezBookkeeping за мапінгом банківського рахунку.
+func (s *SyncService) accountIDFor(ctx context.Context, tx *domain.BankTransaction) (string, error) {
+	mapping, err := s.accounts.EzAccountByBank(ctx, tx.Source, tx.AccountID)
+	if err != nil {
+		return "", err
 	}
-	return s.defaults.SourceAccountID, nil
+	if mapping == nil {
+		return "", fmt.Errorf("%w %s/%s", ErrNoAccountMapping, tx.Source, tx.AccountID)
+	}
+	return mapping.EzbAccountID, nil
 }
 
 // trackUnmapped — запис ключа без мапінгу. Це підказка на майбутнє, а не частина
