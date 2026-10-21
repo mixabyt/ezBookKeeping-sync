@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#111418">
 <title>ezbk мапінг категорій</title>
-<link rel="manifest" href="/manifest.webmanifest">
-<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
 <style>
   :root {
     --bg: #111418; --card: #1a1f26; --line: #2a313b;
@@ -153,7 +153,7 @@
   </template>
 </div>
 
-<script src="/vue.global.prod.js"></script>
+<script src="vue.global.prod.js"></script>
 <script>
 const { createApp, reactive, ref, onMounted } = Vue;
 
@@ -232,6 +232,9 @@ const app = createApp({
     const accountNames = reactive({});
     const loginForm = reactive({ login: '', password: '' });
 
+    // Шляхи навмисно без початкового "/": застосунок може жити під префіксом
+    // (wallet.coffeebeans.space/ezbk/), і "api/me" тоді піде на /ezbk/api/me,
+    // а "/api/me" — у корінь домену, тобто в API самого ezBookkeeping.
     // один вхід для всіх запитів: 401 означає, що сесія закінчилась
     async function api(path, options = {}) {
       const res = await fetch(path, {
@@ -270,10 +273,10 @@ const app = createApp({
       error.value = '';
       try {
         const [unmapped, cats, waitingAcc, accs] = await Promise.all([
-          api(`/api/unmapped?only_pending=${onlyPending.value}`),
-          categories.value.length ? Promise.resolve({ items: categories.value }) : api('/api/categories'),
-          api('/api/unmapped-accounts'),
-          ezAccounts.value.length ? Promise.resolve({ items: ezAccounts.value }) : api('/api/accounts'),
+          api(`api/unmapped?only_pending=${onlyPending.value}`),
+          categories.value.length ? Promise.resolve({ items: categories.value }) : api('api/categories'),
+          api('api/unmapped-accounts'),
+          ezAccounts.value.length ? Promise.resolve({ items: ezAccounts.value }) : api('api/accounts'),
         ]);
         keys.value = unmapped.items;
         categories.value = cats.items;
@@ -290,7 +293,7 @@ const app = createApp({
       busy.value = true;
       error.value = '';
       try {
-        await api('/api/login', { method: 'POST', body: JSON.stringify(loginForm) });
+        await api('api/login', { method: 'POST', body: JSON.stringify(loginForm) });
         authed.value = true;
         loginForm.password = '';
         await load();
@@ -302,7 +305,7 @@ const app = createApp({
     }
 
     async function doLogout() {
-      try { await api('/api/logout', { method: 'POST' }); } catch (e) { /* вже вийшли */ }
+      try { await api('api/logout', { method: 'POST' }); } catch (e) { /* вже вийшли */ }
       authed.value = false;
       keys.value = [];
     }
@@ -313,7 +316,7 @@ const app = createApp({
       error.value = '';
       notice.value = '';
       try {
-        const created = await api('/api/rules', {
+        const created = await api('api/rules', {
           method: 'POST',
           body: JSON.stringify({
             mcc_from: Number(key.key),
@@ -338,7 +341,7 @@ const app = createApp({
       error.value = '';
       notice.value = '';
       try {
-        const created = await api('/api/account-mappings', {
+        const created = await api('api/account-mappings', {
           method: 'POST',
           body: JSON.stringify({
             source: acc.source,
@@ -366,7 +369,7 @@ const app = createApp({
     // сесія в HttpOnly-кукі: перевіряємо її наявність через /api/me
     onMounted(async () => {
       try {
-        await api('/api/me');
+        await api('api/me');
         authed.value = true;
         await load();
       } catch (e) {
@@ -384,7 +387,7 @@ app.component('category-picker', CategoryPicker);
 app.mount('#app');
 
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('/sw.js').catch(() => {});
+  navigator.serviceWorker.register('sw.js').catch(() => {});
 }
 </script>
 </body>
