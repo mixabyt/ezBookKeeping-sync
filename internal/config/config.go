@@ -15,8 +15,7 @@ type Config struct {
 	EzBookKeepingKey     string `env:"EZ_BOOK_KEEPING_KEY"`
 	EzBookKeepingBaseURL string `env:"EZ_BOOK_KEEPING_BASE_URL"`
 
-	DBConnection string `env:"DB_CONNECTION" envDefault:"sqlite"`
-	// DBDatabase — для SQLite це шлях до файлу відносно робочого каталогу
+	// DBDatabase — шлях до файлу SQLite відносно робочого каталогу
 	DBDatabase string `env:"DB_DATABASE"`
 
 	BindAddr string `env:"BIND_ADDR" envDefault:":8089"`
@@ -38,7 +37,6 @@ func NewConfig() *Config {
 		MonobankApiKey:       os.Getenv("MONOBANK_API_KEY"),
 		EzBookKeepingKey:     os.Getenv("EZ_BOOK_KEEPING_KEY"),
 		EzBookKeepingBaseURL: os.Getenv("EZ_BOOK_KEEPING_BASE_URL"),
-		DBConnection:         getEnv("DB_CONNECTION", "sqlite"),
 		DBDatabase:           os.Getenv("DB_DATABASE"),
 		BindAddr:             getEnv("BIND_ADDR", ":8089"),
 		GinMode:              getEnv("GIN_MODE", "debug"),

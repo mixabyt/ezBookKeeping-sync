@@ -1,7 +1,7 @@
 // Мінімальний service worker: кешуємо лише оболонку застосунку.
 // Дані (/api/*) НЕ кешуються навмисно — краще показати помилку мережі,
 // ніж старий список категорій, за яким людина створить неправильне правило.
-const CACHE = 'ezbk-shell-v2';
+const CACHE = 'ezbk-shell-v4';
 const SHELL = ['/', '/vue.global.prod.js', '/icon.svg', '/manifest.webmanifest'];
 
 self.addEventListener('install', (event) => {

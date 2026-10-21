@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"ezbkTools/internal/adapters/ezbookkeeping"
 	"ezbkTools/internal/adapters/httpapi"
 	"ezbkTools/internal/adapters/sqlite"
@@ -20,7 +19,6 @@ import (
 	"github.com/lmittmann/tint"
 	"go.uber.org/zap"
 	"go.uber.org/zap/exp/zapslog"
-	_ "modernc.org/sqlite"
 )
 
 func main() {
@@ -32,7 +30,7 @@ func main() {
 		return
 	}
 
-	db, err := sql.Open(cfg.DBConnection, cfg.DBDatabase)
+	db, err := sqlite.Open(cfg.DBDatabase)
 	if err != nil {
 		logger.Error("open db error", "err", err)
 		return

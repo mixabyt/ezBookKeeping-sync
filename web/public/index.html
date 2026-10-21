@@ -52,6 +52,17 @@
   .badge.wait { color: var(--warn); border-color: #4a3a1c; }
   h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 18px 0 10px; }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; word-break: break-all; }
+  .picker { position: relative; }
+  .picker ul {
+    position: absolute; z-index: 5; left: 0; right: 0; top: calc(100% + 4px);
+    margin: 0; padding: 4px; list-style: none; max-height: 260px; overflow-y: auto;
+    background: #141921; border: 1px solid var(--line); border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(0,0,0,.45);
+  }
+  .picker li { padding: 9px 10px; border-radius: 8px; cursor: pointer; }
+  .picker li.active, .picker li:hover { background: #1f2733; }
+  .picker li .parent { color: var(--muted); font-size: 12px; display: block; }
+  .picker li.none { color: var(--muted); cursor: default; }
 </style>
 </head>
 <body>
@@ -132,12 +143,7 @@
           Банківські категорії мапляться в таблиці bank_category_mcc — через цей екран поки не редагуються.
         </div>
         <div v-else class="row">
-          <select v-model="selection[rowId(key)]">
-            <option value="">— оберіть категорію —</option>
-            <option v-for="c in categoriesFor(key.direction)" :key="c.id" :value="c.id">
-              {{ c.parent_name ? c.parent_name + ' / ' + c.name : c.name }}
-            </option>
-          </select>
+          <category-picker :options="categoriesFor(key.direction)" v-model="selection[rowId(key)]"></category-picker>
           <button :disabled="!selection[rowId(key)] || saving === rowId(key)" @click="saveRule(key)">
             {{ saving === rowId(key) ? '…' : 'Зберегти' }}
           </button>
@@ -151,7 +157,64 @@
 <script>
 const { createApp, reactive, ref, onMounted } = Vue;
 
-createApp({
+// Пошукове поле зі списком: швидше, ніж гортати 42 витратні категорії в select.
+// Пошук за всіма словами в будь-якому порядку по "Батьківська / Назва":
+// "тран так" знайде "Транспорт / Таксі та оренда авто".
+const CategoryPicker = {
+  props: { options: { type: Array, default: () => [] }, modelValue: { type: String, default: '' } },
+  emits: ['update:modelValue'],
+  data: () => ({ query: '', open: false, active: 0 }),
+  computed: {
+    filtered() {
+      const words = this.query.toLowerCase().split(/\s+/).filter(Boolean);
+      return this.options
+        .filter((o) => {
+          const text = this.label(o).toLowerCase();
+          return words.every((w) => text.includes(w));
+        })
+        .slice(0, 30);
+    },
+  },
+  watch: {
+    // після збереження правила батько скидає вибір — очищаємо й поле
+    modelValue(value) { if (!value) this.query = ''; },
+    query() { this.active = 0; },
+  },
+  methods: {
+    label: (o) => (o.parent_name ? o.parent_name + ' / ' + o.name : o.name),
+    onInput() {
+      this.open = true;
+      // текст змінено вручну — попередній вибір уже не відповідає полю
+      if (this.modelValue) this.$emit('update:modelValue', '');
+    },
+    pick(option) {
+      this.query = this.label(option);
+      this.open = false;
+      this.$emit('update:modelValue', option.id);
+    },
+    onKey(event) {
+      if (event.key === 'ArrowDown') { this.open = true; this.active = Math.min(this.active + 1, this.filtered.length - 1); event.preventDefault(); }
+      else if (event.key === 'ArrowUp') { this.active = Math.max(this.active - 1, 0); event.preventDefault(); }
+      else if (event.key === 'Enter' && this.open && this.filtered[this.active]) { this.pick(this.filtered[this.active]); event.preventDefault(); }
+      else if (event.key === 'Escape') { this.open = false; }
+    },
+  },
+  template: `
+    <div class="picker">
+      <input v-model="query" @input="onInput" @focus="open = true" @blur="open = false" @keydown="onKey"
+             placeholder="Пошук категорії…" autocomplete="off" enterkeyhint="done">
+      <ul v-if="open">
+        <!-- mousedown.prevent: інакше blur закриє список раніше, ніж спрацює клік -->
+        <li v-for="(o, i) in filtered" :key="o.id" :class="{ active: i === active }"
+            @mousedown.prevent="pick(o)">
+          <span v-if="o.parent_name" class="parent">{{ o.parent_name }}</span>{{ o.name }}
+        </li>
+        <li v-if="!filtered.length" class="none">Нічого не знайдено</li>
+      </ul>
+    </div>`,
+};
+
+const app = createApp({
   setup() {
     const authed = ref(false);
     const busy = ref(false);
@@ -197,7 +260,8 @@ createApp({
     const accId = (acc) => `${acc.source}/${acc.bank_account_id}`;
     // queued — скільки джоб перевіриться повторно; реально рушать лише ті,
     // для яких є і категорія, і рахунок — тому формулювання обережне
-    const queuedNote = (n) => (n ? `, ${n} ${pluralTx(n)} перевіряються повторно` : '');
+    const checks = (n) => (n % 10 === 1 && n % 100 !== 11 ? 'перевіряється' : 'перевіряються');
+    const queuedNote = (n) => (n ? `, ${n} ${pluralTx(n)} ${checks(n)} повторно` : '');
     const categoriesFor = (direction) =>
       categories.value.filter((c) => c.kind === (direction === 'income' ? 'income' : 'expense'));
 
@@ -315,7 +379,9 @@ createApp({
              loginForm, doLogin, doLogout, saveRule, saveAccount, toggleAll,
              rowId, accId, plural, pluralTx, waits, categoriesFor };
   },
-}).mount('#app');
+});
+app.component('category-picker', CategoryPicker);
+app.mount('#app');
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js').catch(() => {});
