@@ -7,11 +7,6 @@ import (
 	_ "time/tzdata" // база часових поясів у бінарнику (на Windows її може не бути)
 )
 
-// TODO: брати з мапінгу MCC → категорія та рахунок Monobank → рахунок ezBookkeeping
-const (
-	defaultSourceAccountID = "3848785273705988096"
-)
-
 var kyivLocation = mustLoadLocation("Europe/Kyiv")
 
 func (c *Client) FromBankTx(transaction *domain.BankTransaction) *dto.TransactionCreateRequest {
@@ -26,11 +21,9 @@ func (c *Client) FromBankTx(transaction *domain.BankTransaction) *dto.Transactio
 	_, offsetSeconds := now.Zone()
 
 	return &dto.TransactionCreateRequest{
-		Type: txType,
-		//CategoryID:      categoryId,
-		Time:      now.Unix(),
-		UtcOffset: offsetSeconds / 60,
-		//SourceAccountId: defaultSourceAccountID,
+		Type:         txType,
+		Time:         transaction.Time.Unix(),
+		UtcOffset:    offsetSeconds / 60,
 		SourceAmount: int(amount),
 		Comment:      &transaction.Description,
 	}

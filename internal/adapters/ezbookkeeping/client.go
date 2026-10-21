@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"ezbkTools/internal/adapters/ezbookkeeping/dto"
 	"ezbkTools/internal/domain"
 	"fmt"
 	"log"
@@ -65,10 +66,10 @@ func NewEzBookkeepingClient(token, baseUrl string) *Client {
 	}
 }
 
-func (c *Client) AddTransaction(ctx context.Context, tx *domain.BankTransaction, categoryID string) error {
+func (c *Client) AddTransaction(ctx context.Context, tx *domain.BankTransaction, categoryID, accountID string) error {
 	txDto := c.FromBankTx(tx)
 	txDto.CategoryID = categoryID
-	tx.AccountID = defaultSourceAccountID
+	txDto.SourceAccountId = accountID
 
 	body, err := json.Marshal(txDto)
 	if err != nil {
@@ -114,4 +115,55 @@ func (c *Client) backoffRetry(ctx context.Context, req *http.Request) (*http.Res
 		}
 	}
 	return nil, nil
+}
+
+// Categories віддає категорії у плоскому вигляді.
+//
+// ezBookkeeping повертає дерево, згруповане за типом (1 дохід, 2 витрата, 3 переказ),
+// але в транзакції можна вказати лише вторинну категорію (підкатегорію), тому
+// батьківські повертаємо лише тоді, коли в них немає жодної підкатегорії.
+func (c *Client) Categories(ctx context.Context) ([]domain.EzCategory, error) {
+	var byType dto.TransactionCategoryListResponse
+	if err := c.do(ctx, http.MethodGet, getTransactionCategories, nil, &byType); err != nil {
+		return nil, fmt.Errorf("list categories: %w", err)
+	}
+
+	categories := make([]domain.EzCategory, 0, 64)
+	for categoryType, parents := range byType {
+		kind := kindFromType(categoryType)
+		for _, parent := range parents {
+			if len(parent.SubCategories) == 0 {
+				categories = append(categories, domain.EzCategory{
+					ID:     parent.ID,
+					Name:   parent.Name,
+					Kind:   kind,
+					Hidden: parent.Hidden,
+				})
+				continue
+			}
+			for _, sub := range parent.SubCategories {
+				categories = append(categories, domain.EzCategory{
+					ID:         sub.ID,
+					Name:       sub.Name,
+					ParentID:   parent.ID,
+					ParentName: parent.Name,
+					Kind:       kind,
+					// батьківська прихована — підкатегорії теж не показуємо
+					Hidden: sub.Hidden || parent.Hidden,
+				})
+			}
+		}
+	}
+	return categories, nil
+}
+
+func kindFromType(t dto.TransactionCategoryType) domain.EzCategoryKind {
+	switch t {
+	case dto.TransactionCategoryTypeIncome:
+		return domain.EzCategoryIncome
+	case dto.TransactionCategoryTypeTransfer:
+		return domain.EzCategoryTransfer
+	default:
+		return domain.EzCategoryExpense
+	}
 }

@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 
+	"ezbkTools/internal/app"
+	"ezbkTools/internal/domain"
 	"ezbkTools/internal/platform/logctx"
 	"github.com/gin-contrib/requestid"
 	"github.com/gin-gonic/gin"
@@ -30,12 +32,20 @@ type Envelope struct {
 	Meta  *Meta      `json:"meta,omitempty"`
 }
 
+var (
+	errBadKeyType = errors.New("key_type має бути 'mcc' або 'bank_category'")
+	errBadLimit   = errors.New("limit має бути додатним числом")
+	errBadKind    = errors.New("kind має бути 'income', 'expense' або 'transfer'")
+)
+
 const (
 	codeBadRequest      = "bad_request"
 	codeValidationError = "validation_error"
 	codeNotFound        = "not_found"
 	codeConflict        = "conflict"
 	codeInternalError   = "internal_error"
+	codeUnauthorized    = "unauthorized"
+	codeTooManyRequests = "too_many_requests"
 )
 
 func (s *Server) meta(c *gin.Context) *Meta {
@@ -72,6 +82,17 @@ func classifyError(err error) (int, string) {
 
 	switch {
 	// TODO: доменні помилки з app/domain (errors.Is(err, app.ErrXxx)) → not_found / conflict / ...
+	case errors.Is(err, ErrUnauthorized):
+		return http.StatusUnauthorized, codeUnauthorized
+	case errors.Is(err, ErrTooManyAttempts):
+		return http.StatusTooManyRequests, codeTooManyRequests
+	case errors.Is(err, errBadKeyType), errors.Is(err, errBadLimit), errors.Is(err, errBadKind),
+		errors.Is(err, domain.ErrInvalidMCCRange),
+		errors.Is(err, domain.ErrInvalidDirection),
+		errors.Is(err, domain.ErrEmptyCategory):
+		return http.StatusBadRequest, codeValidationError
+	case errors.Is(err, app.ErrRuleExists):
+		return http.StatusConflict, codeConflict
 	case errors.As(err, &validationErr):
 		return http.StatusBadRequest, codeValidationError
 	case errors.Is(err, io.EOF),

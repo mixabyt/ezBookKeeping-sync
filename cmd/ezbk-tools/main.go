@@ -8,18 +8,20 @@ import (
 	"ezbkTools/internal/adapters/sqlite"
 	"ezbkTools/internal/app"
 	"ezbkTools/internal/config"
-	"github.com/gin-gonic/gin"
-	"github.com/lmittmann/tint"
-	"go.uber.org/zap"
-	"go.uber.org/zap/exp/zapslog"
+	"ezbkTools/internal/domain"
 	"log"
 	"log/slog"
-	_ "modernc.org/sqlite"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/lmittmann/tint"
+	"go.uber.org/zap"
+	"go.uber.org/zap/exp/zapslog"
+	_ "modernc.org/sqlite"
 )
 
 func main() {
@@ -38,14 +40,27 @@ func main() {
 	}
 
 	jobs := sqlite.NewJob(db)
+	categories := sqlite.NewCategory(db)
 
 	//categories := sql.
+	ezClient := ezbookkeeping.NewEzBookkeepingClient(cfg.EzBookKeepingKey, cfg.EzBookKeepingBaseURL)
+
 	syncService := app.NewSyncService(
 		jobs,
-		ezbookkeeping.NewEzBookkeepingClient(cfg.EzBookKeepingKey, cfg.EzBookKeepingBaseURL),
+		ezClient,
+		categories,
+		domain.Defaults{
+			ExpenseCategoryID: cfg.DefaultExpenseCategoryID,
+			IncomeCategoryID:  cfg.DefaultIncomeCategoryID,
+			SourceAccountID:   cfg.DefaultSourceAccountID,
+		},
 	)
 	worker := app.NewWorker(jobs, syncService)
-	srv := httpapi.NewServer(syncService)
+	srv := httpapi.NewServer(syncService, app.NewMappingService(categories, ezClient), httpapi.AuthConfig{
+		Login:        cfg.AuthLogin,
+		PasswordHash: cfg.AuthPasswordHash,
+		Secret:       cfg.AuthSecret,
+	})
 
 	httpSrv := &http.Server{
 		Addr:    cfg.BindAddr,

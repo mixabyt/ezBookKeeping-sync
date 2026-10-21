@@ -43,7 +43,7 @@ func (w *Worker) drain(ctx context.Context) {
 	for ctx.Err() == nil {
 		jobs, err := w.jobs.FetchPending(ctx, FetchLimit)
 		if err != nil {
-			logctx.From(ctx).Error("fetch pending jobs: ", err)
+			logctx.From(ctx).Error("fetch pending jobs", "err", err)
 		}
 		for _, job := range jobs {
 			if ctx.Err() != nil {
@@ -60,7 +60,7 @@ func (w *Worker) drain(ctx context.Context) {
 func (w *Worker) handle(ctx context.Context, job *domain.Job) {
 	err := w.svc.Process(ctx, job)
 	if err != nil {
-		logctx.From(ctx).Error("process job: ", job.ID, err)
+		logctx.From(ctx).Error("process job", "job", job.ID, "err", err)
 	}
 
 }

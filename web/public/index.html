@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#111418">
+<title>ezbk мапінг категорій</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<style>
+  :root {
+    --bg: #111418; --card: #1a1f26; --line: #2a313b;
+    --text: #e6e9ee; --muted: #8b95a3; --accent: #4f8cff;
+    --ok: #37b26a; --warn: #d8a236; --err: #e05a5a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom);
+  }
+  header {
+    display: flex; align-items: center; gap: 12px;
+    padding: 14px 16px; border-bottom: 1px solid var(--line); position: sticky; top: 0;
+    background: var(--bg); z-index: 2;
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; flex: 1; }
+  main { padding: 16px; max-width: 760px; margin: 0 auto; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin-bottom: 12px; }
+  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+  input, select, button {
+    font: inherit; width: 100%; padding: 11px 12px; border-radius: 10px;
+    border: 1px solid var(--line); background: #141921; color: var(--text);
+  }
+  button { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  button.ghost { background: transparent; border-color: var(--line); color: var(--muted); font-weight: 500; width: auto; padding: 7px 12px; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .row > * { flex: 1; }
+  .row > button { flex: 0 0 auto; width: auto; padding: 11px 18px; }
+  .key { font-size: 18px; font-weight: 600; }
+  .meta { color: var(--muted); font-size: 13px; margin: 2px 0 12px; }
+  .badge { font-size: 11px; padding: 2px 7px; border-radius: 99px; border: 1px solid var(--line); color: var(--muted); }
+  .badge.expense { color: var(--err); border-color: #43272b; }
+  .badge.income { color: var(--ok); border-color: #22402f; }
+  .badge.done { color: var(--ok); border-color: #22402f; }
+  .msg { padding: 10px 12px; border-radius: 10px; margin-bottom: 12px; font-size: 14px; }
+  .msg.err { background: #2b1a1c; color: #ffb4b4; }
+  .msg.ok { background: #16271d; color: #9ae6b8; }
+  .empty { text-align: center; color: var(--muted); padding: 40px 0; }
+  .muted { color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- екран входу -->
+  <main v-if="!authed">
+    <div class="card" style="margin-top:12vh">
+      <h1 style="margin:0 0 14px;font-size:18px">ezbk мапінг</h1>
+      <div v-if="error" class="msg err">{{ error }}</div>
+      <label>Логін</label>
+      <input v-model="loginForm.login" autocomplete="username" @keyup.enter="doLogin">
+      <div style="height:10px"></div>
+      <label>Пароль</label>
+      <input v-model="loginForm.password" type="password" autocomplete="current-password" @keyup.enter="doLogin">
+      <div style="height:14px"></div>
+      <button :disabled="busy" @click="doLogin">{{ busy ? 'Входимо…' : 'Увійти' }}</button>
+    </div>
+  </main>
+
+  <!-- робочий екран -->
+  <template v-else>
+    <header>
+      <h1>Незамаплені ключі</h1>
+      <button class="ghost" @click="toggleAll">{{ onlyPending ? 'Показати всі' : 'Тільки борг' }}</button>
+      <button class="ghost" @click="doLogout">Вийти</button>
+    </header>
+    <main>
+      <div v-if="error" class="msg err">{{ error }}</div>
+      <div v-if="notice" class="msg ok">{{ notice }}</div>
+
+      <div v-if="loading" class="empty">Завантаження…</div>
+      <div v-else-if="!keys.length" class="empty">
+        Усе замаплено 🎉<br><span class="muted">Нові ключі зʼявляться тут після транзакцій з невідомим MCC</span>
+      </div>
+
+      <div v-for="key in keys" :key="key.key_type + key.key + key.direction" class="card">
+        <div class="row" style="justify-content:space-between">
+          <span class="key">{{ key.key }}</span>
+          <span style="flex:0 0 auto">
+            <span class="badge" :class="key.direction">{{ key.direction === 'income' ? 'дохід' : 'витрата' }}</span>
+            <span v-if="key.resolved" class="badge done" style="margin-left:6px">замаплено</span>
+          </span>
+        </div>
+        <div class="meta">
+          {{ key.sample_desc || '—' }} · {{ key.hits }} {{ plural(key.hits) }} · {{ key.key_type }}
+        </div>
+
+        <div v-if="key.key_type !== 'mcc'" class="muted">
+          Банківські категорії мапляться в таблиці bank_category_mcc — через цей екран поки не редагуються.
+        </div>
+        <div v-else class="row">
+          <select v-model="selection[rowId(key)]">
+            <option value="">— оберіть категорію —</option>
+            <option v-for="c in categoriesFor(key.direction)" :key="c.id" :value="c.id">
+              {{ c.parent_name ? c.parent_name + ' / ' + c.name : c.name }}
+            </option>
+          </select>
+          <button :disabled="!selection[rowId(key)] || saving === rowId(key)" @click="saveRule(key)">
+            {{ saving === rowId(key) ? '…' : 'Зберегти' }}
+          </button>
+        </div>
+      </div>
+    </main>
+  </template>
+</div>
+
+<script src="/vue.global.prod.js"></script>
+<script>
+const { createApp, reactive, ref, onMounted } = Vue;
+
+createApp({
+  setup() {
+    const authed = ref(false);
+    const busy = ref(false);
+    const loading = ref(false);
+    const saving = ref('');
+    const error = ref('');
+    const notice = ref('');
+    const onlyPending = ref(true);
+    const keys = ref([]);
+    const categories = ref([]);
+    const selection = reactive({});
+    const loginForm = reactive({ login: '', password: '' });
+
+    // один вхід для всіх запитів: 401 означає, що сесія закінчилась
+    async function api(path, options = {}) {
+      const res = await fetch(path, {
+        ...options,
+        headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+      });
+      const body = await res.json().catch(() => null);
+      if (res.status === 401) {
+        authed.value = false;
+        throw new Error('Сесія завершилась, увійдіть ще раз');
+      }
+      if (!res.ok) throw new Error(body?.error?.message || `Помилка ${res.status}`);
+      return body?.data;
+    }
+
+    const rowId = (key) => `${key.key_type}:${key.key}:${key.direction}`;
+    const plural = (n) => (n % 10 === 1 && n % 100 !== 11 ? 'раз' : 'разів');
+    const categoriesFor = (direction) =>
+      categories.value.filter((c) => c.kind === (direction === 'income' ? 'income' : 'expense'));
+
+    async function load() {
+      loading.value = true;
+      error.value = '';
+      try {
+        const [unmapped, cats] = await Promise.all([
+          api(`/api/unmapped?only_pending=${onlyPending.value}`),
+          categories.value.length ? Promise.resolve({ items: categories.value }) : api('/api/categories'),
+        ]);
+        keys.value = unmapped.items;
+        categories.value = cats.items;
+      } catch (e) {
+        error.value = e.message;
+      } finally {
+        loading.value = false;
+      }
+    }
+
+    async function doLogin() {
+      busy.value = true;
+      error.value = '';
+      try {
+        await api('/api/login', { method: 'POST', body: JSON.stringify(loginForm) });
+        authed.value = true;
+        loginForm.password = '';
+        await load();
+      } catch (e) {
+        error.value = e.message;
+      } finally {
+        busy.value = false;
+      }
+    }
+
+    async function doLogout() {
+      try { await api('/api/logout', { method: 'POST' }); } catch (e) { /* вже вийшли */ }
+      authed.value = false;
+      keys.value = [];
+    }
+
+    async function saveRule(key) {
+      const id = rowId(key);
+      saving.value = id;
+      error.value = '';
+      notice.value = '';
+      try {
+        await api('/api/rules', {
+          method: 'POST',
+          body: JSON.stringify({
+            mcc_from: Number(key.key),
+            direction: key.direction,
+            ezb_category_id: selection[id],
+            note: key.sample_desc,
+          }),
+        });
+        notice.value = `MCC ${key.key} замаплено`;
+        delete selection[id];
+        await load();
+      } catch (e) {
+        error.value = e.message;
+      } finally {
+        saving.value = '';
+      }
+    }
+
+    function toggleAll() {
+      onlyPending.value = !onlyPending.value;
+      load();
+    }
+
+    // сесія в HttpOnly-кукі: перевіряємо її наявність через /api/me
+    onMounted(async () => {
+      try {
+        await api('/api/me');
+        authed.value = true;
+        await load();
+      } catch (e) {
+        authed.value = false;
+      }
+    });
+
+    return { authed, busy, loading, saving, error, notice, onlyPending, keys, selection,
+             loginForm, doLogin, doLogout, saveRule, toggleAll, rowId, plural, categoriesFor };
+  },
+}).mount('#app');
+
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').catch(() => {});
+}
+</script>
+</body>
+</html>

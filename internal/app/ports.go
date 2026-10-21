@@ -16,9 +16,20 @@ type JobRepository interface {
 // CategoryRepository — мапінг MCC → категорія ezBookkeeping (зберігається в БД).
 type CategoryRepository interface {
 	EzCategoryRuleByMCC(ctx context.Context, mcc int) (*domain.MCCCategoryRule, error)
-	MccByBankCategory(source domain.Source, bankCategory string) (*domain.BankCategoryMCC, error)
+	MccByBankCategory(ctx context.Context, source domain.Source, bankCategory string) (*domain.BankCategoryMCC, error)
+	// TrackUnmapped запам'ятовує ключ, для якого не знайшлося мапінгу,
+	// щоб було видно, яке правило варто дописати. Повторний ключ лише збільшує лічильник.
+	TrackUnmapped(ctx context.Context, key domain.UnmappedKey) error
+	ListUnmapped(ctx context.Context, filter domain.UnmappedFilter) ([]domain.UnmappedKey, error)
+	AddRule(ctx context.Context, rule domain.MCCCategoryRule) (*domain.MCCCategoryRule, error)
+}
+
+// CategoryCatalog — довідник категорій ezBookkeeping. Потрібен лише UI мапінгу:
+// щоб людина обирала категорію зі списку назв, а не вписувала id руками.
+type CategoryCatalog interface {
+	Categories(ctx context.Context) ([]domain.EzCategory, error)
 }
 
 type Bookkeeper interface {
-	AddTransaction(ctx context.Context, tx *domain.BankTransaction, categoryID string) error
+	AddTransaction(ctx context.Context, tx *domain.BankTransaction, categoryID, accountID string) error
 }

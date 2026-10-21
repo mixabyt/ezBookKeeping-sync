@@ -3,13 +3,16 @@ module ezbkTools
 go 1.26.8
 
 require (
+	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1
 	github.com/gin-contrib/requestid v1.0.7
 	github.com/gin-gonic/gin v1.12.0
 	github.com/go-playground/validator/v10 v10.30.3
 	github.com/joho/godotenv v1.5.1
 	github.com/lmittmann/tint v1.1.2
+	github.com/patrickmn/go-cache v2.1.0+incompatible
 	go.uber.org/zap v1.28.0
 	go.uber.org/zap/exp v0.3.0
+	golang.org/x/crypto v0.55.0
 	modernc.org/sqlite v1.55.0
 )
 
@@ -42,7 +45,6 @@ require (
 	go.mongodb.org/mongo-driver/v2 v2.8.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/arch v0.29.0 // indirect
-	golang.org/x/crypto v0.55.0 // indirect
 	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
