@@ -48,6 +48,13 @@
     background: var(--bg); z-index: 2;
   }
   main.login { padding-top: calc(16px + env(safe-area-inset-top)); }
+  /* на телефоні три вкладки + ⟳ + «Вийти» не вміщаються разом із назвою */
+  @media (max-width: 420px) {
+    header { gap: 6px; padding-left: 12px; padding-right: 12px; }
+    header h1 { display: none; }
+    header button.ghost { padding: 7px 10px; }
+    .tabs { gap: 6px; }
+  }
   header h1 { font-size: 16px; margin: 0 6px 0 0; font-weight: 600; }
   .tabs { display: flex; gap: 6px; flex: 1; }
   main { padding: 16px; max-width: 760px; margin: 0 auto; }
@@ -85,6 +92,13 @@
   .empty { text-align: center; color: var(--muted); padding: 40px 0; }
   .muted { color: var(--muted); font-size: 13px; }
   .missing { color: var(--warn); }
+  .amount { font-weight: 600; white-space: nowrap; }
+  .amount.expense { color: var(--err); }
+  .amount.income { color: var(--ok); }
+  .option { display: flex; gap: 12px; align-items: flex-start; padding: 12px 0; border-bottom: 1px solid var(--line); cursor: pointer; }
+  .option:last-of-type { border-bottom: 0; }
+  .option input { margin-top: 4px; }
+  .option b { display: block; font-weight: 600; }
   a { color: var(--accent); }
   h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 18px 0 10px; }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; word-break: break-all; }
@@ -130,6 +144,7 @@
       <nav class="tabs">
         <button class="ghost" :class="{ active: view === 'pending' }" @click="go('pending')">Чекають</button>
         <button class="ghost" :class="{ active: view === 'mappings' }" @click="go('mappings')">Мапінги</button>
+        <button class="ghost icon" :class="{ active: view === 'settings' }" @click="go('settings')" aria-label="Налаштування">⚙</button>
       </nav>
       <button class="ghost icon" :disabled="refreshing || loading" @click="manualRefresh" aria-label="Оновити">⟳</button>
       <button class="ghost" @click="doLogout">Вийти</button>
@@ -141,13 +156,17 @@
       <!-- ============ Чекають ============ -->
       <template v-if="view === 'pending'">
         <div class="spread" style="margin-bottom:4px">
-          <span class="muted">{{ onlyPending ? 'Лише те, що ще не замаплено' : 'Усі ключі, разом із замапленими' }}</span>
-          <button class="ghost" @click="toggleAll">{{ onlyPending ? 'Показати всі' : 'Тільки борг' }}</button>
+          <span class="muted">
+            Режим: <a href="#/settings" @click.prevent="go('settings')">{{ modeTitle(mode) }}</a>
+            <template v-if="mode === 'mcc'"> · {{ onlyPending ? 'лише незамаплене' : 'усі ключі' }}</template>
+          </span>
+          <button v-if="mode === 'mcc'" class="ghost" @click="toggleAll">{{ onlyPending ? 'Показати всі' : 'Тільки борг' }}</button>
         </div>
 
         <div v-if="loading" class="empty">Завантаження…</div>
-        <div v-else-if="!error && !keys.length && !waitingAccounts.length" class="empty">
-          Усе замаплено 🎉<br><span class="muted">Нові ключі й рахунки зʼявляться тут після транзакцій без мапінгу</span>
+        <div v-else-if="!error && !pendingCount && !waitingAccounts.length" class="empty">
+          <template v-if="mode === 'manual'">Усе підтверджено 🎉<br><span class="muted">Нові транзакції зʼявляться тут на підтвердження</span></template>
+          <template v-else>Усе замаплено 🎉<br><span class="muted">Нові ключі й рахунки зʼявляться тут після транзакцій без мапінгу</span></template>
         </div>
 
         <template v-if="!loading">
@@ -174,9 +193,58 @@
             </div>
           </template>
 
-          <h2 v-if="keys.length">Категорії (MCC)</h2>
+          <!-- режим merchant: картка на продавця (MCC + опис) -->
+          <template v-if="mode === 'merchant'">
+            <h2 v-if="waitingMerchants.length">Продавці</h2>
+            <div v-for="m in waitingMerchants" :key="merchId(m)" class="card">
+              <div class="spread">
+                <span class="key">{{ m.description || '(без опису)' }}</span>
+                <span>
+                  <span class="badge wait" style="margin-right:6px">{{ m.waiting_jobs }} {{ waits(m.waiting_jobs) }}</span>
+                  <span class="badge" :class="m.direction">{{ dirLabel(m.direction) }}</span>
+                </span>
+              </div>
+              <div class="meta">MCC {{ m.mcc }}</div>
+              <div class="row">
+                <category-picker :options="categoriesFor(m.direction)" v-model="merchantSelection[merchId(m)]"></category-picker>
+                <button :disabled="!merchantSelection[merchId(m)] || saving === merchId(m)" @click="saveMerchant(m)">
+                  {{ saving === merchId(m) ? '…' : 'Зберегти' }}
+                </button>
+              </div>
+              <div style="height:10px"></div>
+              <!-- без опису правило продавця неможливе — лише на весь MCC -->
+              <label class="check">
+                <input type="checkbox" :checked="!m.description || merchantApplyAll[merchId(m)]" :disabled="!m.description"
+                       @change="merchantApplyAll[merchId(m)] = $event.target.checked">
+                для всього MCC {{ m.mcc }}, а не лише «{{ m.description || '…' }}»
+              </label>
+            </div>
+          </template>
 
-          <div v-for="key in keys" :key="rowId(key)" class="card">
+          <!-- режим manual: картка на транзакцію з пропозицією -->
+          <template v-if="mode === 'manual'">
+            <h2 v-if="review.length">На підтвердження</h2>
+            <div v-for="item in review" :key="item.id" class="card">
+              <div class="spread">
+                <span class="key">{{ item.description || '(без опису)' }}</span>
+                <span class="amount" :class="item.direction">{{ money(item.amount) }}</span>
+              </div>
+              <div class="meta">{{ txDate(item.tx_time) }} · MCC {{ item.mcc }} · {{ dirLabel(item.direction) }}</div>
+              <category-picker :options="categoriesFor(item.direction)" v-model="reviewSelection[item.id]"
+                               :current-label="categoryName(reviewSelection[item.id])"></category-picker>
+              <div style="height:10px"></div>
+              <div class="spread">
+                <span class="muted">{{ suggestionNote(item) }}</span>
+                <button style="width:auto;padding:9px 18px" :disabled="!reviewSelection[item.id] || saving === 'job:' + item.id" @click="confirmJob(item)">
+                  {{ saving === 'job:' + item.id ? '…' : 'Підтвердити' }}
+                </button>
+              </div>
+            </div>
+          </template>
+
+          <h2 v-if="mode === 'mcc' && keys.length">Категорії (MCC)</h2>
+
+          <div v-for="key in (mode === 'mcc' ? keys : [])" :key="rowId(key)" class="card">
             <div class="spread">
               <span class="key">{{ key.key }}</span>
               <span>
@@ -207,7 +275,7 @@
       </template>
 
       <!-- ============ Мапінги ============ -->
-      <template v-else>
+      <template v-else-if="view === 'mappings'">
         <div class="muted" style="margin-bottom:4px">
           Зміни діють на нові транзакції й ті, що чекають. Уже записані в ezBookkeeping не переписуються.
         </div>
@@ -238,8 +306,34 @@
             </div>
           </div>
 
+          <input v-if="rules.length || merchantRules.length" v-model="ruleQuery" type="search"
+                 placeholder="Пошук правил: продавець, MCC, категорія" style="margin:18px 0 0">
+
+          <h2>Правила продавців</h2>
+          <div v-if="!merchantRules.length" class="muted">Правил продавців ще немає — вони створюються в режимі «MCC + опис».</div>
+          <div v-else-if="!filteredMerchantRules.length" class="muted">Нічого не знайдено.</div>
+
+          <div v-for="rule in filteredMerchantRules" :key="'m' + rule.id" class="card" :class="{ off: !merchantEdits[rule.id].enabled }">
+            <div class="spread">
+              <span class="key">{{ rule.description }}</span>
+              <span class="badge" :class="rule.direction">{{ dirLabel(rule.direction) }}</span>
+            </div>
+            <div class="meta">
+              MCC {{ rule.mcc }} ·
+              <span :class="{ missing: !categoryById(rule.ezb_category_id) }">{{ categoryName(rule.ezb_category_id) }}</span>
+            </div>
+            <category-picker :options="categoriesFor(rule.direction)" v-model="merchantEdits[rule.id].category"
+                             :current-label="categoryName(merchantEdits[rule.id].category)"></category-picker>
+            <div style="height:10px"></div>
+            <div class="spread">
+              <label class="check"><input type="checkbox" v-model="merchantEdits[rule.id].enabled"> увімкнено</label>
+              <button style="width:auto;padding:9px 18px" :disabled="!merchantDirty(rule) || saving === 'merchant:' + rule.id" @click="updateMerchantRule(rule)">
+                {{ saving === 'merchant:' + rule.id ? '…' : 'Зберегти' }}
+              </button>
+            </div>
+          </div>
+
           <h2>Правила MCC</h2>
-          <input v-if="rules.length" v-model="ruleQuery" type="search" placeholder="Пошук: MCC, категорія або нотатка" style="margin-bottom:12px">
           <div v-if="!rules.length" class="muted">Правил ще немає — створіть їх на вкладці «Чекають».</div>
           <div v-else-if="!filteredRules.length" class="muted">Нічого не знайдено.</div>
 
@@ -263,6 +357,24 @@
             </div>
           </div>
         </template>
+      </template>
+
+      <!-- ============ Налаштування ============ -->
+      <template v-else>
+        <h2 style="margin-top:4px">Як визначати категорію</h2>
+        <div class="card">
+          <label v-for="opt in modeOptions" :key="opt.value" class="option">
+            <input type="radio" name="mode" :value="opt.value" v-model="modeDraft">
+            <span><b>{{ opt.title }}</b><span class="muted">{{ opt.hint }}</span></span>
+          </label>
+          <div style="height:12px"></div>
+          <button :disabled="modeDraft === mode || saving === 'settings'" @click="saveMode">
+            {{ saving === 'settings' ? '…' : 'Зберегти' }}
+          </button>
+        </div>
+        <div class="muted">
+          Режим діє і на транзакції, що вже чекають. Мапінг рахунку потрібен у всіх режимах.
+        </div>
       </template>
     </main>
   </template>
@@ -373,6 +485,21 @@ const app = createApp({
     const waitingAccounts = ref([]);
     const accountSelection = reactive({});
     const accountNames = reactive({});
+    const waitingMerchants = ref([]);       // режим merchant
+    const merchantSelection = reactive({});
+    const merchantApplyAll = reactive({});
+    const review = ref([]);                 // режим manual
+    const reviewSelection = reactive({});
+
+    // режим мапінгу: з налаштувань, вантажиться разом із «Чекають»
+    const mode = ref('mcc');
+    const modeDraft = ref('mcc');
+    const modeOptions = [
+      { value: 'mcc', title: 'Лише MCC', hint: 'Одне правило на MCC: усі продуктові магазини — «Їжа». Найменше ручної роботи.' },
+      { value: 'merchant', title: 'MCC + опис', hint: 'Правило на продавця: Preply і Steam з одним MCC 5818 — різні категорії. Якщо правила продавця немає — за правилом MCC.' },
+      { value: 'manual', title: 'Підтверджувати кожну', hint: 'Нічого не йде в ezBookkeeping без «Підтвердити». Категорія вже запропонована за правилами або як минулого разу.' },
+    ];
+    const modeTitle = (m) => modeOptions.find((o) => o.value === m)?.title || m;
 
     // «Мапінги»
     const rules = ref([]);
@@ -380,6 +507,8 @@ const app = createApp({
     const ruleQuery = ref('');
     const accountMappings = ref([]);
     const accEdits = reactive({});
+    const merchantRules = ref([]);
+    const merchantEdits = reactive({});
 
     const clear = (obj) => Object.keys(obj).forEach((k) => delete obj[k]);
 
@@ -391,7 +520,11 @@ const app = createApp({
       waitingAccounts.value = [];
       rules.value = [];
       accountMappings.value = [];
-      [selection, accountSelection, accountNames, ruleEdits, accEdits].forEach(clear);
+      waitingMerchants.value = [];
+      review.value = [];
+      merchantRules.value = [];
+      [selection, accountSelection, accountNames, ruleEdits, accEdits,
+       merchantSelection, merchantApplyAll, reviewSelection, merchantEdits].forEach(clear);
       notice.value = '';
     }
 
@@ -436,6 +569,11 @@ const app = createApp({
     // для яких є і категорія, і рахунок — тому формулювання обережне
     const checks = (n) => (n % 10 === 1 && n % 100 !== 11 ? 'перевіряється' : 'перевіряються');
     const queuedNote = (n) => (n ? `, ${n} ${pluralTx(n)} ${checks(n)} повторно` : '');
+    const merchId = (m) => `${m.mcc}:${m.direction}:${m.description}`;
+    // сума в копійках; валюта — гривня, бо інші рахунки Monobank поки не мапляться
+    const money = (kop) => (kop < 0 ? '−' : '+') +
+      (Math.abs(kop) / 100).toLocaleString('uk-UA', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' ₴';
+    const txDate = (iso) => new Date(iso).toLocaleString('uk-UA', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
 
     // у picker пропонуємо лише видимі категорії, а підписи шукаємо серед усіх
     const categoriesFor = (direction) =>
@@ -464,6 +602,34 @@ const app = createApp({
       const e = ruleEdits[r.id];
       return e && (e.category !== r.ezb_category_id || e.enabled !== r.enabled);
     };
+    const filteredMerchantRules = computed(() => {
+      const words = ruleQuery.value.toLowerCase().split(/\s+/).filter(Boolean);
+      if (!words.length) return merchantRules.value;
+      return merchantRules.value.filter((r) => {
+        const text = `${r.description} ${r.mcc} ${categoryName(r.ezb_category_id)} ${dirLabel(r.direction)}`.toLowerCase();
+        return words.every((w) => text.includes(w));
+      });
+    });
+    const merchantDirty = (r) => {
+      const e = merchantEdits[r.id];
+      return e && (e.category !== r.ezb_category_id || e.enabled !== r.enabled);
+    };
+    // що показати під пропозицією в режимі manual
+    const suggestionNote = (item) => {
+      if (item.suggested_category_id && reviewSelection[item.id] !== item.suggested_category_id) return 'змінено вручну';
+      return {
+        merchant_rule: 'за правилом продавця',
+        mcc_rule: `за правилом MCC ${item.mcc}`,
+        history: 'як минулого разу',
+      }[item.suggestion_source] || 'пропозиції немає — оберіть категорію';
+    };
+    // скільки карток у «Чекають» для поточного режиму (без рахунків)
+    const pendingCount = computed(() => ({
+      mcc: keys.value.length,
+      merchant: waitingMerchants.value.length,
+      manual: review.value.length,
+    }[mode.value] || 0));
+
     const accDirty = (m) => {
       const e = accEdits[accId(m)];
       return e && (e.ezb !== m.ezb_account_id || e.name !== m.name);
@@ -478,22 +644,45 @@ const app = createApp({
       if (accs) ezAccounts.value = accs.items;
     }
 
+    // Усі списки паралельно, а показуємо той, що відповідає режиму: запити до локальної
+    // SQLite дешеві, а так режим, змінений з іншого пристрою, підхопиться на наступному оновленні.
     async function loadPending() {
-      const [unmapped, waitingAcc] = await Promise.all([
+      const [settings, unmapped, waitingAcc, merchants, reviewRes] = await Promise.all([
+        api('api/settings'),
         api(`api/unmapped?only_pending=${onlyPending.value}`),
         api('api/unmapped-accounts'),
+        api('api/waiting-merchants'),
+        api('api/review'),
         loadCatalogs(),
       ]);
+      mode.value = settings.mapping_mode;
       keys.value = unmapped.items;
       waitingAccounts.value = waitingAcc.items;
+      waitingMerchants.value = merchants.items;
+      // пропозицію ставимо лише новим карткам: фонове оновлення не має скидати
+      // категорію, яку людина вже змінила, але ще не підтвердила
+      reviewRes.items.forEach((item) => {
+        if (!(item.id in reviewSelection)) reviewSelection[item.id] = item.suggested_category_id;
+      });
+      review.value = reviewRes.items;
+    }
+
+    async function loadSettings() {
+      const settings = await api('api/settings');
+      mode.value = settings.mapping_mode;
+      modeDraft.value = settings.mapping_mode;
     }
 
     async function loadMappings() {
-      const [rulesRes, mappingsRes] = await Promise.all([
+      const [rulesRes, mappingsRes, merchantRes] = await Promise.all([
         api('api/rules'),
         api('api/account-mappings'),
+        api('api/merchant-rules'),
         loadCatalogs(),
       ]);
+      clear(merchantEdits);
+      merchantRes.items.forEach((r) => { merchantEdits[r.id] = { category: r.ezb_category_id, enabled: r.enabled }; });
+      merchantRules.value = merchantRes.items;
       clear(ruleEdits);
       rulesRes.items.forEach((r) => { ruleEdits[r.id] = { category: r.ezb_category_id, enabled: r.enabled }; });
       clear(accEdits);
@@ -508,7 +697,7 @@ const app = createApp({
       error.value = '';
       if (!keepNotice) notice.value = '';
       try {
-        await (view.value === 'mappings' ? loadMappings() : loadPending());
+        await ({ mappings: loadMappings, settings: loadSettings }[view.value] || loadPending)();
       } catch (e) {
         error.value = e.message;
       } finally {
@@ -550,10 +739,14 @@ const app = createApp({
 
     // вкладка живе в hash: перезавантаження лишає на тому ж екрані,
     // і під префіксом /ezbk/ серверу нічого знати не треба
-    const viewFromHash = () => (location.hash.startsWith('#/mappings') ? 'mappings' : 'pending');
+    const viewFromHash = () => {
+      if (location.hash.startsWith('#/mappings')) return 'mappings';
+      if (location.hash.startsWith('#/settings')) return 'settings';
+      return 'pending';
+    };
     function go(name, search = '') {
       ruleQuery.value = search;
-      location.hash = name === 'mappings' ? '#/mappings' : '#/';
+      location.hash = name === 'pending' ? '#/' : '#/' + name;
     }
     window.addEventListener('hashchange', () => {
       const next = viewFromHash();
@@ -660,6 +853,59 @@ const app = createApp({
       return `Рахунок ${edit.name || m.bank_account_id} збережено${queuedNote(res.queued)}`;
     });
 
+    // режим merchant: правило на продавця; галочка — заразом на весь MCC.
+    // Без опису правило продавця неможливе — тоді одразу звичайне правило MCC.
+    const saveMerchant = (m) => save(merchId(m), async () => {
+      const id = merchId(m);
+      const category = merchantSelection[id];
+      const forMCC = !m.description || !!merchantApplyAll[id];
+      let res;
+      if (!m.description) {
+        res = await api('api/rules', {
+          method: 'POST',
+          body: JSON.stringify({ mcc_from: m.mcc, direction: m.direction, ezb_category_id: category }),
+        });
+      } else {
+        res = await api('api/merchant-rules', {
+          method: 'POST',
+          body: JSON.stringify({
+            mcc: m.mcc, direction: m.direction, description: m.description,
+            ezb_category_id: category, apply_to_mcc: forMCC,
+          }),
+        });
+      }
+      delete merchantSelection[id];
+      delete merchantApplyAll[id];
+      return `${forMCC ? 'MCC ' + m.mcc : '«' + m.description + '»'} замаплено${queuedNote(res.queued)}`;
+    });
+
+    // режим manual: підтвердити категорію (запропоновану чи змінену) — транзакція йде в ezBookkeeping
+    const confirmJob = (item) => save('job:' + item.id, async () => {
+      const category = reviewSelection[item.id];
+      await api(`api/jobs/${item.id}/confirm`, {
+        method: 'POST',
+        body: JSON.stringify({ ezb_category_id: category }),
+      });
+      delete reviewSelection[item.id];
+      return `«${item.description || 'Транзакцію'}» підтверджено: ${categoryName(category)}`;
+    });
+
+    const updateMerchantRule = (rule) => save('merchant:' + rule.id, async () => {
+      const edit = merchantEdits[rule.id];
+      const res = await api(`api/merchant-rules/${rule.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ ezb_category_id: edit.category, enabled: edit.enabled }),
+      });
+      return res.rule.enabled
+        ? `«${rule.description}» збережено`
+        : `«${rule.description}» вимкнено — далі за правилом MCC, якщо воно є`;
+    });
+
+    const saveMode = () => save('settings', async () => {
+      await api('api/settings', { method: 'PUT', body: JSON.stringify({ mapping_mode: modeDraft.value }) });
+      return `Режим: ${modeTitle(modeDraft.value)}. Транзакції, що чекають, перевіряються за ним`;
+    });
+
     function toggleAll() {
       onlyPending.value = !onlyPending.value;
       load();
@@ -683,6 +929,10 @@ const app = createApp({
              keys, selection, waitingAccounts, ezAccounts, accountSelection, accountNames,
              rules, ruleEdits, ruleQuery, filteredRules, accountMappings, accEdits,
              go, doLogin, doLogout, saveRule, saveAccount, updateRule, updateAccount, toggleAll,
+             mode, modeDraft, modeOptions, modeTitle, pendingCount, saveMode,
+             waitingMerchants, merchantSelection, merchantApplyAll, merchId, saveMerchant,
+             review, reviewSelection, money, txDate, suggestionNote, confirmJob,
+             merchantRules, merchantEdits, filteredMerchantRules, merchantDirty, updateMerchantRule,
              rowId, accId, dirLabel, mccRange, plural, pluralTx, waits, categoriesFor,
              categoryById, categoryName, accountLabel, accountById, accountName, ruleDirty, accDirty };
   },

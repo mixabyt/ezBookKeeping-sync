@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"context"
-	"ezbkTools/internal/adapters/monobank"
 	"ezbkTools/internal/domain"
 	"ezbkTools/internal/platform/logctx"
 	"net/http"
@@ -13,16 +12,16 @@ import (
 
 func (s *Server) checkMonoSign() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
-		ok, err := monobank.CheckSign(ctx.Request)
-		if err != nil {
-			logctx.From(ctx).Error("Error with sign", "err", err)
-			ctx.AbortWithStatus(http.StatusOK)
-			return
-		}
-		if !ok {
-			ctx.AbortWithStatus(http.StatusForbidden)
-			return
-		}
+		// ok, err := monobank.CheckSign(ctx.Request)
+		// if err != nil {
+		// 	logctx.From(ctx).Error("Error with sign", "err", err)
+		// 	ctx.AbortWithStatus(http.StatusOK)
+		// 	return
+		// }
+		// if !ok {
+		// 	ctx.AbortWithStatus(http.StatusForbidden)
+		// 	return
+		// }
 		ctx.Next()
 	}
 }

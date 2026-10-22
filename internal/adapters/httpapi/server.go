@@ -75,6 +75,16 @@ func (s *Server) init() {
 	secured.POST("/rules", s.createRule())
 	secured.PUT("/rules/:id", s.updateRule())
 	secured.GET("/account-mappings", s.listAccountMappings())
+
+	// режими мапінгу: налаштування, правила продавців, ручне підтвердження
+	secured.GET("/settings", s.getSettings())
+	secured.PUT("/settings", s.putSettings())
+	secured.GET("/waiting-merchants", s.waitingMerchants())
+	secured.GET("/merchant-rules", s.listMerchantRules())
+	secured.POST("/merchant-rules", s.createMerchantRule())
+	secured.PUT("/merchant-rules/:id", s.updateMerchantRule())
+	secured.GET("/review", s.reviewQueue())
+	secured.POST("/jobs/:id/confirm", s.confirmJob())
 	secured.GET("/categories", s.ezCategories())
 	secured.GET("/accounts", s.ezAccounts())
 	secured.GET("/unmapped-accounts", s.unmappedAccounts())

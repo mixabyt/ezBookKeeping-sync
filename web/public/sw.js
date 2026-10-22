@@ -1,7 +1,7 @@
 // Мінімальний service worker: кешуємо лише оболонку застосунку.
 // Дані (/api/*) НЕ кешуються навмисно — краще показати помилку мережі,
 // ніж старий список категорій, за яким людина створить неправильне правило.
-const CACHE = 'ezbk-shell-v8';
+const CACHE = 'ezbk-shell-v9';
 // Усе відносно scope: під префіксом (/ezbk/) корінь застосунку — це /ezbk/, а не /.
 const BASE = self.registration.scope;
 const SHELL = ['./', 'vue.global.prod.js', 'icon.svg', 'icon-180.png', 'icon-192.png', 'icon-512.png', 'icon-maskable-512.png', 'manifest.webmanifest'].map((p) => new URL(p, BASE).href);

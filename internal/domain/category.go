@@ -12,7 +12,65 @@ var (
 	ErrInvalidMCCRange  = errors.New("MCC має бути в межах 0–9999, а mcc_from не більший за mcc_to")
 	ErrInvalidDirection = errors.New("direction має бути 'expense' або 'income'")
 	ErrEmptyCategory    = errors.New("не вказана категорія ezBookkeeping")
+	ErrEmptyDescription = errors.New("для правила продавця потрібен опис транзакції")
+	ErrInvalidMode      = errors.New("mapping_mode має бути 'mcc', 'merchant' або 'manual'")
 )
+
+// MappingMode — як визначається категорія транзакції (налаштування в PWA).
+type MappingMode string
+
+const (
+	ModeMCC      MappingMode = "mcc"      // лише правило MCC
+	ModeMerchant MappingMode = "merchant" // правило продавця, потім правило MCC
+	ModeManual   MappingMode = "manual"   // кожну транзакцію підтверджує людина
+)
+
+func (m MappingMode) Valid() bool {
+	return m == ModeMCC || m == ModeMerchant || m == ModeManual
+}
+
+// MerchantRule — правило продавця: MCC + напрямок + опис → категорія.
+// Потрібне, бо один MCC покриває різне: 5818 — і Preply, і Steam.
+// Опис порівнюється точно (після trim).
+type MerchantRule struct {
+	ID            int64
+	MCC           int
+	Direction     Direction
+	Description   string
+	EzbCategoryID string
+	Enabled       bool
+}
+
+func (r MerchantRule) Validate() error {
+	if r.MCC < 0 || r.MCC > 9999 {
+		return fmt.Errorf("%w: отримано %d", ErrInvalidMCCRange, r.MCC)
+	}
+	if r.Direction != DirectionExpense && r.Direction != DirectionIncome {
+		return fmt.Errorf("%w: отримано %q", ErrInvalidDirection, r.Direction)
+	}
+	if r.Description == "" {
+		return ErrEmptyDescription
+	}
+	if r.EzbCategoryID == "" {
+		return ErrEmptyCategory
+	}
+	return nil
+}
+
+// SuggestionSource — звідки взялась запропонована категорія.
+type SuggestionSource string
+
+const (
+	SuggestMerchantRule SuggestionSource = "merchant_rule"
+	SuggestMCCRule      SuggestionSource = "mcc_rule"
+	SuggestHistory      SuggestionSource = "history" // як цей продавець пішов минулого разу
+)
+
+// Suggestion — запропонована категорія; порожній CategoryID — пропонувати нічого.
+type Suggestion struct {
+	CategoryID string
+	Source     SuggestionSource
+}
 
 // BankCategoryMCC — крок 1 категоризації (нормалізація): банківська категорія → MCC.
 // Для банків без MCC (напр. Приват); для Monobank не потрібна.

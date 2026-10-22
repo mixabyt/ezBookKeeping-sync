@@ -42,14 +42,15 @@ func main() {
 	jobs := sqlite.NewJob(db)
 	categories := sqlite.NewCategory(db)
 	accounts := sqlite.NewAccount(db)
+	settings := sqlite.NewSettings(db)
 
 	ezClient := ezbookkeeping.NewEzBookkeepingClient(cfg.EzBookKeepingKey, cfg.EzBookKeepingBaseURL)
 
-	syncService := app.NewSyncService(jobs, ezClient, categories, accounts)
+	syncService := app.NewSyncService(jobs, ezClient, categories, accounts, settings)
 	worker := app.NewWorker(jobs, syncService)
 
 	// syncService — він же JobWaker: після нового мапінгу будить воркер
-	mappingService := app.NewMappingService(categories, accounts, ezClient, jobs, syncService)
+	mappingService := app.NewMappingService(categories, accounts, ezClient, jobs, settings, syncService)
 
 	srv := httpapi.NewServer(syncService, mappingService, httpapi.AuthConfig{
 		Login:        cfg.AuthLogin,

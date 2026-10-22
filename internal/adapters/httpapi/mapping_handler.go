@@ -183,9 +183,8 @@ type UpdateRuleRequest struct {
 // updateRule — PUT /api/rules/:id: інша категорія, увімкнути/вимкнути, нотатка.
 func (s *Server) updateRule() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		id, err := strconv.ParseInt(c.Param("id"), 10, 64)
-		if err != nil || id <= 0 {
-			s.errorResponse(c, http.StatusBadRequest, errBadID)
+		id, ok := s.pathID(c)
+		if !ok {
 			return
 		}
 

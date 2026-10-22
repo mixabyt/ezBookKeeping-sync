@@ -21,26 +21,21 @@ func NewCategory(db *sql.DB) *Category {
 	}
 }
 
-func (c *Category) EzCategoryRuleByMCC(ctx context.Context, mcc int) (*domain.MCCCategoryRule, error) {
-	query := `
-		SELECT
-			id,
-			mcc_from,
-			mcc_to,
-			direction,
-			priority,
-			ezb_category_id,
-			enabled,
-			note
+// EzCategoryRuleByMCC — увімкнене правило для MCC і напрямку з найменшим priority.
+// Напрямок важливий: повернення коштів від магазину — це дохід, і витратна
+// категорія для нього не підходить.
+func (c *Category) EzCategoryRuleByMCC(ctx context.Context, mcc int, direction domain.Direction) (*domain.MCCCategoryRule, error) {
+	query := `SELECT ` + ruleColumns + `
 		FROM mcc_category_rules
 		WHERE enabled = 1
+			AND direction = ?
 			AND mcc_from <= ?
 			AND mcc_to >= ?
 		ORDER BY priority ASC
 		LIMIT 1
 	`
 
-	rule, err := scanRule(c.db.QueryRowContext(ctx, query, mcc, mcc))
+	rule, err := scanRule(c.db.QueryRowContext(ctx, query, direction, mcc, mcc))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -294,4 +289,131 @@ func (c *Category) AddRule(ctx context.Context, rule domain.MCCCategoryRule) (*d
 		return nil, fmt.Errorf("add mcc rule %d-%d: %w", rule.MCCFrom, rule.MCCTo, err)
 	}
 	return &rule, nil
+}
+
+// merchantColumns — порядок колонок, який очікує scanMerchantRule.
+const merchantColumns = `id, mcc, direction, description, ezb_category_id, enabled`
+
+func scanMerchantRule(row interface{ Scan(dest ...any) error }) (*domain.MerchantRule, error) {
+	var (
+		rule       domain.MerchantRule
+		direction  string
+		categoryID int64
+		enabled    int
+	)
+	if err := row.Scan(&rule.ID, &rule.MCC, &direction, &rule.Description, &categoryID, &enabled); err != nil {
+		return nil, err
+	}
+	rule.Direction = domain.Direction(direction)
+	rule.EzbCategoryID = fmt.Sprint(categoryID)
+	rule.Enabled = enabled == 1
+	return &rule, nil
+}
+
+// MerchantRule — увімкнене правило продавця; nil, nil — немає.
+func (c *Category) MerchantRule(ctx context.Context, mcc int, direction domain.Direction, description string) (*domain.MerchantRule, error) {
+	query := `SELECT ` + merchantColumns + `
+		FROM merchant_category_rules
+		WHERE enabled = 1 AND mcc = ? AND direction = ? AND description = ?`
+
+	rule, err := scanMerchantRule(c.db.QueryRowContext(ctx, query, mcc, direction, description))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("merchant rule %d/%s/%q: %w", mcc, direction, description, err)
+	}
+	return rule, nil
+}
+
+// AddMerchantRule — UNIQUE (mcc, direction, description) → app.ErrRuleExists (409).
+func (c *Category) AddMerchantRule(ctx context.Context, rule domain.MerchantRule) (*domain.MerchantRule, error) {
+	query := `
+		INSERT INTO merchant_category_rules (mcc, direction, description, ezb_category_id, enabled)
+		VALUES (?, ?, ?, ?, ?)
+		RETURNING id
+	`
+	enabled := 0
+	if rule.Enabled {
+		enabled = 1
+	}
+
+	err := c.db.QueryRowContext(ctx, query,
+		rule.MCC, rule.Direction, rule.Description, rule.EzbCategoryID, enabled,
+	).Scan(&rule.ID)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return nil, fmt.Errorf("%w: «%s» MCC %d %s", app.ErrRuleExists, rule.Description, rule.MCC, rule.Direction)
+		}
+		return nil, fmt.Errorf("add merchant rule %q: %w", rule.Description, err)
+	}
+	return &rule, nil
+}
+
+func (c *Category) ListMerchantRules(ctx context.Context) ([]domain.MerchantRule, error) {
+	query := `SELECT ` + merchantColumns + ` FROM merchant_category_rules ORDER BY description, mcc, direction`
+
+	rows, err := c.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("list merchant rules: %w", err)
+	}
+	defer rows.Close()
+
+	rules := make([]domain.MerchantRule, 0)
+	for rows.Next() {
+		rule, err := scanMerchantRule(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan merchant rule: %w", err)
+		}
+		rules = append(rules, *rule)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate merchant rules: %w", err)
+	}
+	return rules, nil
+}
+
+func (c *Category) UpdateMerchantRule(ctx context.Context, id int64, categoryID string, enabled bool) (*domain.MerchantRule, error) {
+	query := `
+		UPDATE merchant_category_rules
+		SET ezb_category_id = ?, enabled = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+		RETURNING ` + merchantColumns
+
+	enabledInt := 0
+	if enabled {
+		enabledInt = 1
+	}
+
+	rule, err := scanMerchantRule(c.db.QueryRowContext(ctx, query, categoryID, enabledInt, id))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("%w: id %d", app.ErrRuleNotFound, id)
+		}
+		return nil, fmt.Errorf("update merchant rule %d: %w", id, err)
+	}
+	return rule, nil
+}
+
+// LastCategoryFor — з якою категорією цей продавець останнього разу пішов
+// в ezBookkeeping. Джоби до міграції 000007 категорії не мають — їх пропускаємо.
+func (c *Category) LastCategoryFor(ctx context.Context, mcc int, direction domain.Direction, description string) (string, error) {
+	query := `
+		SELECT ezb_category_id FROM jobs
+		WHERE status = ? AND ezb_category_id <> ''
+			AND mcc = ? AND (amount < 0) = ? AND trim(description) = ?
+		ORDER BY id DESC
+		LIMIT 1
+	`
+	var categoryID string
+	err := c.db.QueryRowContext(ctx, query,
+		domain.JobDone, mcc, direction == domain.DirectionExpense, description,
+	).Scan(&categoryID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil
+		}
+		return "", fmt.Errorf("last category for %q: %w", description, err)
+	}
+	return categoryID, nil
 }

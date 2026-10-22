@@ -21,6 +21,7 @@ type SyncService struct {
 	jobs          JobRepository
 	categories    CategoryRepository
 	accounts      AccountRepository
+	settings      SettingsRepository
 	ezBookKeeping Bookkeeper
 	wakeUp        chan struct{}
 }
@@ -30,6 +31,7 @@ func NewSyncService(
 	book Bookkeeper,
 	categories CategoryRepository,
 	accounts AccountRepository,
+	settings SettingsRepository,
 ) *SyncService {
 	return &SyncService{
 		jobs:          jobs,
@@ -37,6 +39,7 @@ func NewSyncService(
 		ezBookKeeping: book,
 		categories:    categories,
 		accounts:      accounts,
+		settings:      settings,
 	}
 }
 
@@ -72,15 +75,33 @@ func (s *SyncService) WakesUp() <-chan struct{} {
 	return s.wakeUp
 }
 
-// Process — викликає воркер для pending- і waiting_mapping-джоб.
+// Process — викликає воркер для pending-, waiting_mapping- і needs_review-джоб.
 //
 // Транзакція йде в ezBookkeeping лише коли відомі і категорія, і рахунок. Обидва
 // перевіряються за один прохід, щоб у причині очікування одразу було все, чого бракує,
 // а не "домапив категорію → тепер виявилось, що й рахунку немає".
+//
+// Категорія: підтверджена людиною (job.CategoryID) — у будь-якому режимі; інакше
+// за режимом із налаштувань. Режим читається на кожну джобу, тож перемикання в UI
+// діє і на ті, що вже чекають.
 func (s *SyncService) Process(ctx context.Context, job *domain.Job) error {
 	tx := &job.Tx
-	categoryID, catErr := s.categoryIDFor(ctx, tx)
+	mode, err := s.settings.MappingMode(ctx)
+	if err != nil {
+		// джобу не чіпаємо: на наступному тіку спробуємо ще
+		return fmt.Errorf("read mapping mode: %w", err)
+	}
+
 	accountID, accErr := s.accountIDFor(ctx, tx)
+	categoryID, catErr := job.CategoryID, error(nil)
+	needsReview := false
+	if categoryID == "" {
+		if mode == domain.ModeManual {
+			needsReview = true
+		} else {
+			categoryID, catErr = s.categoryIDFor(ctx, tx, mode)
+		}
+	}
 
 	var missing []string
 	for _, err := range []error{catErr, accErr} {
@@ -98,8 +119,9 @@ func (s *SyncService) Process(ctx context.Context, job *domain.Job) error {
 	if len(missing) > 0 {
 		firstTime := job.Status == domain.JobPending
 		// hits у unmapped_keys рахує транзакції, а не спроби: waiting-джоби
-		// перевіряються на кожному тіку, і без цієї умови лічильник ріс би безкінечно
-		if firstTime && errors.Is(catErr, ErrNoCategoryRule) {
+		// перевіряються на кожному тіку, і без цієї умови лічильник ріс би безкінечно.
+		// Історія ключів MCC потрібна лише режиму mcc: у merchant картки будуються з самих джоб.
+		if firstTime && mode == domain.ModeMCC && errors.Is(catErr, ErrNoCategoryRule) {
 			s.trackUnmapped(ctx, domain.UnmappedKey{
 				Source:     tx.Source,
 				KeyType:    domain.KeyMCC,
@@ -116,27 +138,89 @@ func (s *SyncService) Process(ctx context.Context, job *domain.Job) error {
 		return s.jobs.MarkWaiting(ctx, job.ID, reason)
 	}
 
-	err := s.ezBookKeeping.AddTransaction(ctx, tx, categoryID, accountID)
+	if needsReview {
+		if job.Status != domain.JobNeedsReview {
+			logctx.From(ctx).Info("джоба чекає підтвердження", "job", job.ID, "tx", tx.ID)
+		}
+		return s.jobs.MarkNeedsReview(ctx, job.ID)
+	}
+
+	err = s.ezBookKeeping.AddTransaction(ctx, tx, categoryID, accountID)
 	if err != nil {
 		return errors.Join(
 			s.jobs.MarkFailed(ctx, job.ID, err),
 			err,
 		)
 	}
-	return s.jobs.MarkDone(ctx, job.ID)
+	return s.jobs.MarkDone(ctx, job.ID, categoryID)
 }
 
-// categoryIDFor — категорія за правилом MCC. Дефолту немає навмисно: транзакція
+// categoryIDFor — категорія за правилами режиму. Дефолту немає навмисно: транзакція
 // в "Іншому" — це помилка, яку потім доводиться виправляти руками в ezBookkeeping.
-func (s *SyncService) categoryIDFor(ctx context.Context, tx *domain.BankTransaction) (string, error) {
-	rule, err := s.categories.EzCategoryRuleByMCC(ctx, tx.MCC)
+func (s *SyncService) categoryIDFor(ctx context.Context, tx *domain.BankTransaction, mode domain.MappingMode) (string, error) {
+	if mode == domain.ModeMCC {
+		rule, err := s.categories.EzCategoryRuleByMCC(ctx, tx.MCC, tx.Direction())
+		if err != nil {
+			return "", err
+		}
+		if rule == nil {
+			return "", fmt.Errorf("%w для MCC %d (%s)", ErrNoCategoryRule, tx.MCC, tx.Direction())
+		}
+		return rule.EzbCategoryID, nil
+	}
+
+	// merchant: правило продавця, потім правило MCC. Історію тут не беремо:
+	// без підтвердження людиною «як минулого разу» — це вгадування.
+	suggestion, err := suggestCategory(ctx, s.categories, tx, false)
 	if err != nil {
 		return "", err
 	}
-	if rule == nil {
-		return "", fmt.Errorf("%w для MCC %d (%s)", ErrNoCategoryRule, tx.MCC, tx.Direction())
+	if suggestion.CategoryID == "" {
+		return "", fmt.Errorf("%w для «%s» (MCC %d, %s)", ErrNoCategoryRule, merchantDescription(tx), tx.MCC, tx.Direction())
 	}
-	return rule.EzbCategoryID, nil
+	return suggestion.CategoryID, nil
+}
+
+// suggestCategory — категорія для транзакції за пріоритетом: правило продавця →
+// правило MCC → (withHistory) як цей продавець пішов минулого разу.
+// Порожня Suggestion — нічого не знайшлось.
+func suggestCategory(ctx context.Context, categories CategoryRepository, tx *domain.BankTransaction, withHistory bool) (domain.Suggestion, error) {
+	description := merchantDescription(tx)
+
+	if description != "" {
+		rule, err := categories.MerchantRule(ctx, tx.MCC, tx.Direction(), description)
+		if err != nil {
+			return domain.Suggestion{}, err
+		}
+		if rule != nil {
+			return domain.Suggestion{CategoryID: rule.EzbCategoryID, Source: domain.SuggestMerchantRule}, nil
+		}
+	}
+
+	rule, err := categories.EzCategoryRuleByMCC(ctx, tx.MCC, tx.Direction())
+	if err != nil {
+		return domain.Suggestion{}, err
+	}
+	if rule != nil {
+		return domain.Suggestion{CategoryID: rule.EzbCategoryID, Source: domain.SuggestMCCRule}, nil
+	}
+
+	if withHistory && description != "" {
+		last, err := categories.LastCategoryFor(ctx, tx.MCC, tx.Direction(), description)
+		if err != nil {
+			return domain.Suggestion{}, err
+		}
+		if last != "" {
+			return domain.Suggestion{CategoryID: last, Source: domain.SuggestHistory}, nil
+		}
+	}
+	return domain.Suggestion{}, nil
+}
+
+// merchantDescription — опис як ключ продавця: Monobank пише продавця стабільно,
+// а пробіли по краях — єдине, що варто прибрати перед точним порівнянням.
+func merchantDescription(tx *domain.BankTransaction) string {
+	return strings.TrimSpace(tx.Description)
 }
 
 // accountIDFor — рахунок ezBookkeeping за мапінгом банківського рахунку.

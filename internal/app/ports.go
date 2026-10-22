@@ -9,16 +9,32 @@ import (
 type JobRepository interface {
 	Add(ctx context.Context, tx *domain.BankTransaction) error
 	FetchPending(ctx context.Context, limit int) ([]domain.Job, error)
-	MarkDone(ctx context.Context, id int64) error
+	// MarkDone запамʼятовує категорію, з якою джоба пішла в ezBookkeeping:
+	// з неї береться пропозиція «як минулого разу» в режимі manual.
+	MarkDone(ctx context.Context, id int64, categoryID string) error
 	MarkFailed(ctx context.Context, id int64, err error) error
 
 	// MarkWaiting — для джоби бракує мапінгу; reason пояснює, чого саме.
 	MarkWaiting(ctx context.Context, id int64, reason string) error
-	// FetchWaiting — з курсором afterID: набір waiting-джоб не зменшується від обробки.
+	// MarkNeedsReview — режим manual: чекаємо підтвердження категорії людиною.
+	MarkNeedsReview(ctx context.Context, id int64) error
+	// FetchWaiting — waiting_mapping і needs_review, з курсором afterID:
+	// набір таких джоб не зменшується від обробки.
 	FetchWaiting(ctx context.Context, afterID int64, limit int) ([]domain.Job, error)
-	// WaitingCounts / WaitingAccounts — що саме блокує джоби, для лічильників у UI.
+	// WaitingCounts / WaitingAccounts / WaitingMerchants — що саме блокує джоби, для UI.
 	WaitingCounts(ctx context.Context) (map[domain.WaitingKey]int, error)
 	WaitingAccounts(ctx context.Context) ([]domain.WaitingAccount, error)
+	WaitingMerchants(ctx context.Context) ([]domain.WaitingMerchant, error)
+	ListNeedsReview(ctx context.Context) ([]domain.Job, error)
+	// Confirm — needs_review → pending з обраною категорією.
+	// Джоба вже не на підтвердженні — ErrJobNotReviewable.
+	Confirm(ctx context.Context, id int64, categoryID string) error
+}
+
+// SettingsRepository — налаштування, що змінюються з PWA.
+type SettingsRepository interface {
+	MappingMode(ctx context.Context) (domain.MappingMode, error)
+	SetMappingMode(ctx context.Context, mode domain.MappingMode) error
 }
 
 // AccountRepository — мапінг банківського рахунку на рахунок ezBookkeeping.
@@ -37,7 +53,7 @@ type JobWaker interface {
 
 // CategoryRepository — мапінг MCC → категорія ezBookkeeping (зберігається в БД).
 type CategoryRepository interface {
-	EzCategoryRuleByMCC(ctx context.Context, mcc int) (*domain.MCCCategoryRule, error)
+	EzCategoryRuleByMCC(ctx context.Context, mcc int, direction domain.Direction) (*domain.MCCCategoryRule, error)
 	MccByBankCategory(ctx context.Context, source domain.Source, bankCategory string) (*domain.BankCategoryMCC, error)
 	// TrackUnmapped запам'ятовує ключ, для якого не знайшлося мапінгу,
 	// щоб було видно, яке правило варто дописати. Повторний ключ лише збільшує лічильник.
@@ -48,6 +64,16 @@ type CategoryRepository interface {
 	// UpdateRule міняє лише категорію, ознаку enabled і нотатку: діапазон і напрямок —
 	// це вже інше правило. Немає такого id — ErrRuleNotFound.
 	UpdateRule(ctx context.Context, id int64, categoryID string, enabled bool, note string) (*domain.MCCCategoryRule, error)
+
+	// MerchantRule — увімкнене правило продавця; nil, nil — немає.
+	MerchantRule(ctx context.Context, mcc int, direction domain.Direction, description string) (*domain.MerchantRule, error)
+	AddMerchantRule(ctx context.Context, rule domain.MerchantRule) (*domain.MerchantRule, error)
+	ListMerchantRules(ctx context.Context) ([]domain.MerchantRule, error)
+	// UpdateMerchantRule — лише категорія й enabled. Немає такого id — ErrRuleNotFound.
+	UpdateMerchantRule(ctx context.Context, id int64, categoryID string, enabled bool) (*domain.MerchantRule, error)
+	// LastCategoryFor — категорія, з якою цей продавець останнього разу пішов
+	// в ezBookkeeping; "" — ще не було.
+	LastCategoryFor(ctx context.Context, mcc int, direction domain.Direction, description string) (string, error)
 }
 
 // CategoryCatalog — довідник категорій ezBookkeeping. Потрібен лише UI мапінгу:

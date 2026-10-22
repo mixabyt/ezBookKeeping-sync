@@ -3,8 +3,10 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"ezbkTools/internal/app"
 	"ezbkTools/internal/domain"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -37,29 +39,42 @@ func (j *Job) Add(ctx context.Context, tx *domain.BankTransaction) error {
 }
 
 func (j *Job) FetchPending(ctx context.Context, limit int) ([]domain.Job, error) {
-	return j.fetchByStatus(ctx, domain.JobPending, 0, limit)
+	return j.fetchByStatus(ctx, 0, limit, domain.JobPending)
 }
 
-// FetchWaiting — джоби, яким бракувало мапінгу. Воркер перебирає їх на кожному тіку:
-// якщо людина вже домапила категорію й рахунок, джоба піде далі.
+// FetchWaiting — джоби, яким бракувало мапінгу або підтвердження. Воркер перебирає їх
+// на кожному тіку: людина могла домапити категорію й рахунок або змінити режим.
 func (j *Job) FetchWaiting(ctx context.Context, afterID int64, limit int) ([]domain.Job, error) {
-	return j.fetchByStatus(ctx, domain.JobWaitingMapping, afterID, limit)
+	return j.fetchByStatus(ctx, afterID, limit, domain.JobWaitingMapping, domain.JobNeedsReview)
 }
 
-func (j *Job) fetchByStatus(ctx context.Context, status domain.JobStatus, afterID int64, limit int) ([]domain.Job, error) {
+// ListNeedsReview — усі джоби на підтвердження, найстаріші першими.
+func (j *Job) ListNeedsReview(ctx context.Context) ([]domain.Job, error) {
+	return j.fetchByStatus(ctx, 0, -1, domain.JobNeedsReview) // LIMIT -1 у SQLite — без обмеження
+}
+
+func (j *Job) fetchByStatus(ctx context.Context, afterID int64, limit int, statuses ...domain.JobStatus) ([]domain.Job, error) {
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(statuses)), ",")
 	query := `SELECT id, tx_id, account_id, tx_time, amount, mcc, description, hold,
-			         status, attempts, last_error, source
+			         status, attempts, last_error, ezb_category_id, source
 			  FROM jobs
-			  WHERE status = ? AND id > ?
+			  WHERE status IN (` + placeholders + `) AND id > ?
 			  ORDER BY id
 			  LIMIT ?`
-	rows, err := j.db.QueryContext(ctx, query, status, afterID, limit)
+
+	args := make([]any, 0, len(statuses)+2)
+	for _, status := range statuses {
+		args = append(args, status)
+	}
+	args = append(args, afterID, limit)
+
+	rows, err := j.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("fetch %s jobs: %w", status, err)
+		return nil, fmt.Errorf("fetch %v jobs: %w", statuses, err)
 	}
 	defer rows.Close()
 
-	jobs := make([]domain.Job, 0, limit)
+	jobs := make([]domain.Job, 0, max(limit, 0))
 	for rows.Next() {
 		var (
 			job    domain.Job
@@ -77,15 +92,16 @@ func (j *Job) fetchByStatus(ctx context.Context, status domain.JobStatus, afterI
 			&job.Status,
 			&job.Attempts,
 			&job.LastError,
+			&job.CategoryID,
 			&job.Tx.Source,
 		); err != nil {
-			return nil, fmt.Errorf("scan %s job: %w", status, err)
+			return nil, fmt.Errorf("scan %v job: %w", statuses, err)
 		}
 		job.Tx.Time = time.Unix(txTime, 0)
 		jobs = append(jobs, job)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate %s jobs: %w", status, err)
+		return nil, fmt.Errorf("iterate %v jobs: %w", statuses, err)
 	}
 
 	return jobs, nil
@@ -93,9 +109,10 @@ func (j *Job) fetchByStatus(ctx context.Context, status domain.JobStatus, afterI
 
 // MarkDone очищає last_error: джоба могла пройти через waiting_mapping,
 // і стара причина очікування на успішній джобі виглядала б як помилка.
-func (j *Job) MarkDone(ctx context.Context, id int64) error {
-	query := `UPDATE jobs SET status = ?, last_error = '', updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-	_, err := j.db.ExecContext(ctx, query, domain.JobDone, id)
+// categoryID — з якою категорією джоба пішла (джерело пропозиції «як минулого разу»).
+func (j *Job) MarkDone(ctx context.Context, id int64, categoryID string) error {
+	query := `UPDATE jobs SET status = ?, last_error = '', ezb_category_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+	_, err := j.db.ExecContext(ctx, query, domain.JobDone, categoryID, id)
 	if err != nil {
 		return fmt.Errorf("mark done job %d: %w", id, err)
 	}
@@ -176,4 +193,61 @@ func (j *Job) WaitingAccounts(ctx context.Context) ([]domain.WaitingAccount, err
 		accounts = append(accounts, account)
 	}
 	return accounts, rows.Err()
+}
+
+// MarkNeedsReview — режим manual: категорію має підтвердити людина.
+func (j *Job) MarkNeedsReview(ctx context.Context, id int64) error {
+	query := `UPDATE jobs SET status = ?, last_error = '', updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+	_, err := j.db.ExecContext(ctx, query, domain.JobNeedsReview, id)
+	if err != nil {
+		return fmt.Errorf("mark needs review job %d: %w", id, err)
+	}
+	return nil
+}
+
+// Confirm — needs_review → pending з категорією, яку обрала людина. Умова на статус
+// у самому UPDATE: подвійний тап чи друга вкладка не відправлять транзакцію двічі.
+func (j *Job) Confirm(ctx context.Context, id int64, categoryID string) error {
+	query := `UPDATE jobs SET status = ?, ezb_category_id = ?, updated_at = CURRENT_TIMESTAMP
+			  WHERE id = ? AND status = ?`
+	res, err := j.db.ExecContext(ctx, query, domain.JobPending, categoryID, id, domain.JobNeedsReview)
+	if err != nil {
+		return fmt.Errorf("confirm job %d: %w", id, err)
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return fmt.Errorf("%w: id %d", app.ErrJobNotReviewable, id)
+	}
+	return nil
+}
+
+// WaitingMerchants — продавці (MCC + напрямок + опис), через яких стоять джоби.
+// trim у SQL — той самий ключ, що й merchantDescription в app.
+func (j *Job) WaitingMerchants(ctx context.Context) ([]domain.WaitingMerchant, error) {
+	query := `SELECT mcc, amount < 0 AS is_expense, trim(description) AS merchant, count(*)
+			  FROM jobs
+			  WHERE status = ?
+			  GROUP BY mcc, is_expense, merchant
+			  ORDER BY count(*) DESC, max(id) DESC`
+	rows, err := j.db.QueryContext(ctx, query, domain.JobWaitingMapping)
+	if err != nil {
+		return nil, fmt.Errorf("waiting merchants: %w", err)
+	}
+	defer rows.Close()
+
+	merchants := make([]domain.WaitingMerchant, 0)
+	for rows.Next() {
+		var (
+			m         domain.WaitingMerchant
+			isExpense bool
+		)
+		if err := rows.Scan(&m.MCC, &isExpense, &m.Description, &m.WaitingJobs); err != nil {
+			return nil, fmt.Errorf("scan waiting merchant: %w", err)
+		}
+		m.Direction = domain.DirectionIncome
+		if isExpense {
+			m.Direction = domain.DirectionExpense
+		}
+		merchants = append(merchants, m)
+	}
+	return merchants, rows.Err()
 }
