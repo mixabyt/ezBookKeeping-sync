@@ -2,11 +2,18 @@
 <html lang="uk">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- застосунок, а не сторінка: без зуму (iOS ігнорує user-scalable — див. gesturestart нижче) -->
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="theme-color" content="#111418">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="ezbk">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>ezbk мапінг категорій</title>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
+<!-- iOS не бере SVG для домашнього екрана: без PNG ставить скриншот сторінки -->
+<link rel="apple-touch-icon" href="icon-180.png">
 <style>
   :root {
     --bg: #111418; --card: #1a1f26; --line: #2a313b;
@@ -16,16 +23,31 @@
   /* до монтування Vue браузер показав би сирий шаблон з {{ … }} */
   [v-cloak] { display: none; }
   * { box-sizing: border-box; }
+  html, body {
+    overscroll-behavior: none;       /* без відскоку й pull-to-refresh */
+    -webkit-text-size-adjust: 100%;  /* iOS не збільшує шрифт при повороті */
+    touch-action: manipulation;      /* без зуму подвійним тапом і затримки тапу */
+  }
   body {
     margin: 0; background: var(--bg); color: var(--text);
     font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom);
+    padding: 0 0 env(safe-area-inset-bottom);
+    /* текст інтерфейсу не виділяється, і довгий тап не відкриває системне меню */
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
   }
+  /* у полях виділення й вставка потрібні; id рахунку інколи треба скопіювати */
+  input, select, textarea, .mono { -webkit-user-select: text; user-select: text; }
   header {
     display: flex; align-items: center; gap: 8px;
-    padding: 12px 16px; border-bottom: 1px solid var(--line); position: sticky; top: 0;
+    /* статус-бар black-translucent лежить поверх контенту — відступаємо під нього тут,
+       а не в body, інакше липкий хедер заїде під годинник */
+    padding: calc(12px + env(safe-area-inset-top)) 16px 12px;
+    border-bottom: 1px solid var(--line); position: sticky; top: 0;
     background: var(--bg); z-index: 2;
   }
+  main.login { padding-top: calc(16px + env(safe-area-inset-top)); }
   header h1 { font-size: 16px; margin: 0 6px 0 0; font-weight: 600; }
   .tabs { display: flex; gap: 6px; flex: 1; }
   main { padding: 16px; max-width: 760px; margin: 0 auto; }
@@ -33,13 +55,17 @@
   .card.off { opacity: .6; }
   label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
   input, select, button {
-    font: inherit; width: 100%; padding: 11px 12px; border-radius: 10px;
+    /* 16px: з меншим шрифтом iOS зумить сторінку при фокусі на полі й не повертає масштаб */
+    font: inherit; font-size: 16px; width: 100%; padding: 11px 12px; border-radius: 10px;
     border: 1px solid var(--line); background: #141921; color: var(--text);
   }
   input[type=checkbox] { width: auto; padding: 0; margin: 0; accent-color: var(--accent); }
   label.check { display: inline-flex; align-items: center; gap: 8px; margin: 0; color: var(--text); font-size: 14px; cursor: pointer; }
   button { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; cursor: pointer; }
   button:disabled { opacity: .5; cursor: default; }
+  /* підсвітку тапу прибрали — відгук на натискання даємо самі */
+  button:active:not(:disabled) { opacity: .75; }
+  button.icon { font-size: 18px; line-height: 1; padding: 6px 10px; }
   button.ghost { background: transparent; border-color: var(--line); color: var(--muted); font-weight: 500; width: auto; padding: 7px 12px; }
   button.ghost.active { color: var(--text); border-color: var(--accent); }
   .row { display: flex; gap: 8px; align-items: center; }
@@ -70,7 +96,9 @@
     box-shadow: 0 8px 24px rgba(0,0,0,.45);
   }
   .picker li { padding: 9px 10px; border-radius: 8px; cursor: pointer; }
-  .picker li.active, .picker li:hover { background: #1f2733; }
+  .picker li.active { background: #1f2733; }
+  /* на сенсорному екрані :hover «залипає» на останньому тапнутому пункті */
+  @media (hover: hover) { .picker li:hover { background: #1f2733; } }
   .picker li .parent { color: var(--muted); font-size: 12px; display: block; }
   .picker li.none { color: var(--muted); cursor: default; }
 </style>
@@ -81,7 +109,7 @@
   <!-- authed === null: ще перевіряємо сесію — нічого не показуємо, щоб логін не блимав -->
 
   <!-- екран входу -->
-  <main v-if="authed === false">
+  <main v-if="authed === false" class="login">
     <div class="card" style="margin-top:12vh">
       <h1 style="margin:0 0 14px;font-size:18px">ezbk мапінг</h1>
       <div v-if="error" class="msg err">{{ error }}</div>
@@ -103,6 +131,7 @@
         <button class="ghost" :class="{ active: view === 'pending' }" @click="go('pending')">Чекають</button>
         <button class="ghost" :class="{ active: view === 'mappings' }" @click="go('mappings')">Мапінги</button>
       </nav>
+      <button class="ghost icon" :disabled="refreshing || loading" @click="manualRefresh" aria-label="Оновити">⟳</button>
       <button class="ghost" @click="doLogout">Вийти</button>
     </header>
     <main>
@@ -487,6 +516,38 @@ const app = createApp({
       }
     }
 
+    // Тихе оновлення «Чекають»: нові транзакції зʼявляються самі, без перезапуску.
+    // Без loading = true: інакше список на мить зміниться на «Завантаження…» і
+    // відкритий picker розмонтується разом із набраним текстом. Картки в v-for з
+    // ключами, тож вибір і набраний текст у наявних лишаються на місці.
+    const refreshing = ref(false);
+    let refreshError = false; // помилку саме оновлення прибираємо при наступному успіху, чужу — ні
+    async function refresh() {
+      if (!authed.value || view.value !== 'pending' || saving.value || loading.value || refreshing.value) return;
+      refreshing.value = true;
+      try {
+        await loadPending();
+        if (refreshError) error.value = '';
+        refreshError = false;
+      } catch (e) {
+        if (authed.value) { error.value = e.message; refreshError = true; }
+      } finally {
+        refreshing.value = false;
+      }
+    }
+
+    // на «Мапінгах» — повне перезавантаження: там незбережені правки скидаються свідомо, по кнопці
+    const manualRefresh = () => (view.value === 'pending' ? refresh() : load());
+
+    // «Мапінги» самі не змінюються, а їх перезавантаження скинуло б незбережені правки,
+    // тому опитуємо лише «Чекають» і лише коли застосунок на екрані
+    const POLL_MS = 15000;
+    setInterval(() => { if (document.visibilityState === 'visible') refresh(); }, POLL_MS);
+    // повернулись у застосунок з фону — не чекаємо таймера
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') refresh();
+    });
+
     // вкладка живе в hash: перезавантаження лишає на тому ж екрані,
     // і під префіксом /ezbk/ серверу нічого знати не треба
     const viewFromHash = () => (location.hash.startsWith('#/mappings') ? 'mappings' : 'pending');
@@ -618,7 +679,7 @@ const app = createApp({
       }
     });
 
-    return { authed, busy, loading, saving, error, notice, view, onlyPending, loginForm,
+    return { authed, busy, loading, saving, refreshing, manualRefresh, error, notice, view, onlyPending, loginForm,
              keys, selection, waitingAccounts, ezAccounts, accountSelection, accountNames,
              rules, ruleEdits, ruleQuery, filteredRules, accountMappings, accEdits,
              go, doLogin, doLogout, saveRule, saveAccount, updateRule, updateAccount, toggleAll,
@@ -628,6 +689,9 @@ const app = createApp({
 });
 app.component('category-picker', CategoryPicker);
 app.mount('#app');
+
+// iOS Safari ігнорує user-scalable=no (заради доступності), тож pinch-zoom гасимо подією
+document.addEventListener('gesturestart', (e) => e.preventDefault());
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('sw.js').catch(() => {});

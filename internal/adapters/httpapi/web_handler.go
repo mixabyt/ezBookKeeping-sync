@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"io/fs"
+	"mime"
 	"net/http"
 	"strings"
 
@@ -17,6 +18,8 @@ import (
 func (s *Server) serveWeb() gin.HandlerFunc {
 	assets := web.FS()
 	fileServer := http.FileServer(http.FS(assets))
+	// Go не знає .webmanifest і віддав би text/plain
+	_ = mime.AddExtensionType(".webmanifest", "application/manifest+json")
 
 	return func(c *gin.Context) {
 		path := strings.TrimPrefix(c.Request.URL.Path, "/")
