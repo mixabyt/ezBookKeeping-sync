@@ -36,6 +36,7 @@ var (
 	errBadKeyType = errors.New("key_type має бути 'mcc' або 'bank_category'")
 	errBadLimit   = errors.New("limit має бути додатним числом")
 	errBadKind    = errors.New("kind має бути 'income', 'expense' або 'transfer'")
+	errBadID      = errors.New("id має бути додатним числом")
 )
 
 const (
@@ -86,7 +87,7 @@ func classifyError(err error) (int, string) {
 		return http.StatusUnauthorized, codeUnauthorized
 	case errors.Is(err, ErrTooManyAttempts):
 		return http.StatusTooManyRequests, codeTooManyRequests
-	case errors.Is(err, errBadKeyType), errors.Is(err, errBadLimit), errors.Is(err, errBadKind),
+	case errors.Is(err, errBadKeyType), errors.Is(err, errBadLimit), errors.Is(err, errBadKind), errors.Is(err, errBadID),
 		errors.Is(err, domain.ErrInvalidMCCRange),
 		errors.Is(err, domain.ErrInvalidDirection),
 		errors.Is(err, domain.ErrEmptyCategory),
@@ -94,6 +95,8 @@ func classifyError(err error) (int, string) {
 		return http.StatusBadRequest, codeValidationError
 	case errors.Is(err, app.ErrRuleExists):
 		return http.StatusConflict, codeConflict
+	case errors.Is(err, app.ErrRuleNotFound):
+		return http.StatusNotFound, codeNotFound
 	case errors.As(err, &validationErr):
 		return http.StatusBadRequest, codeValidationError
 	case errors.Is(err, io.EOF),

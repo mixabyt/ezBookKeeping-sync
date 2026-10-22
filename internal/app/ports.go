@@ -44,6 +44,10 @@ type CategoryRepository interface {
 	TrackUnmapped(ctx context.Context, key domain.UnmappedKey) error
 	ListUnmapped(ctx context.Context, filter domain.UnmappedFilter) ([]domain.UnmappedKey, error)
 	AddRule(ctx context.Context, rule domain.MCCCategoryRule) (*domain.MCCCategoryRule, error)
+	ListRules(ctx context.Context) ([]domain.MCCCategoryRule, error)
+	// UpdateRule міняє лише категорію, ознаку enabled і нотатку: діапазон і напрямок —
+	// це вже інше правило. Немає такого id — ErrRuleNotFound.
+	UpdateRule(ctx context.Context, id int64, categoryID string, enabled bool, note string) (*domain.MCCCategoryRule, error)
 }
 
 // CategoryCatalog — довідник категорій ezBookkeeping. Потрібен лише UI мапінгу:

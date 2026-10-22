@@ -1,6 +1,8 @@
 package config
 
 import (
+	"errors"
+	"io/fs"
 	"log"
 	"os"
 
@@ -30,8 +32,16 @@ type Config struct {
 
 func NewConfig() *Config {
 
+	// .env шукається в поточному каталозі процесу; під systemd це WorkingDirectory.
+	// Відсутній файл і зламаний файл — різні проблеми, тому й повідомлення різні:
+	// раніше обидві давали "not found", і синтаксична помилка ховалась.
 	if err := godotenv.Load(); err != nil {
-		log.Println("No .env file found, relying on system environment variables")
+		wd, _ := os.Getwd()
+		if errors.Is(err, fs.ErrNotExist) {
+			log.Printf(".env не знайдено в %s — беремо змінні лише з оточення", wd)
+		} else {
+			log.Printf(".env у %s не вдалося прочитати: %v", wd, err)
+		}
 	}
 	return &Config{
 		MonobankApiKey:       os.Getenv("MONOBANK_API_KEY"),

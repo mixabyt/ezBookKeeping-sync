@@ -12,6 +12,9 @@ import (
 // Окрема помилка, щоб адаптер віддав 409, а не 500.
 var ErrRuleExists = errors.New("правило для цього діапазону MCC і напрямку вже існує")
 
+// ErrRuleNotFound — правила з таким id немає (адаптер віддає 404).
+var ErrRuleNotFound = errors.New("правило не знайдено")
+
 // MappingService — сценарії ручного мапінгу: що лишилось замапити і створення мапінгів.
 // Окремо від SyncService навмисно: там гарячий шлях транзакції, тут — робота людини через UI.
 // Після кожного нового мапінгу будить воркер, щоб джоби, які на нього чекали, рушили одразу.
@@ -100,18 +103,56 @@ func (s *MappingService) CreateRule(ctx context.Context, rule domain.MCCCategory
 		return nil, 0, err
 	}
 
-	queued := 0
-	if counts, err := s.jobs.WaitingCounts(ctx); err == nil {
-		for key, n := range counts {
-			if key.Direction == created.Direction && key.MCC >= created.MCCFrom && key.MCC <= created.MCCTo {
-				queued += n
-			}
-		}
-	}
-	// лічильник — лише для UI; правило вже створено, тому його помилку не віддаємо
-
+	queued := s.queuedForRule(ctx, created)
 	s.waker.Wake()
 	return created, queued, nil
+}
+
+// Rules — усі правила MCC → категорія, разом з вимкненими: їх теж можна редагувати.
+func (s *MappingService) Rules(ctx context.Context) ([]domain.MCCCategoryRule, error) {
+	return s.categories.ListRules(ctx)
+}
+
+// UpdateRule змінює категорію / enabled / нотатку правила і будить воркер:
+// увімкнене правило могло розблокувати джоби. Уже записані в ezBookkeeping
+// транзакції не переписуються.
+func (s *MappingService) UpdateRule(ctx context.Context, id int64, categoryID string, enabled bool, note string) (*domain.MCCCategoryRule, int, error) {
+	if categoryID == "" {
+		return nil, 0, domain.ErrEmptyCategory
+	}
+
+	updated, err := s.categories.UpdateRule(ctx, id, categoryID, enabled, note)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	queued := 0
+	if updated.Enabled {
+		queued = s.queuedForRule(ctx, updated)
+	}
+	s.waker.Wake()
+	return updated, queued, nil
+}
+
+// queuedForRule — скільки джоб, що чекають, підпадає під правило.
+// Лічильник лише для UI; правило вже збережено, тому його помилку не віддаємо.
+func (s *MappingService) queuedForRule(ctx context.Context, rule *domain.MCCCategoryRule) int {
+	counts, err := s.jobs.WaitingCounts(ctx)
+	if err != nil {
+		return 0
+	}
+	queued := 0
+	for key, n := range counts {
+		if key.Direction == rule.Direction && key.MCC >= rule.MCCFrom && key.MCC <= rule.MCCTo {
+			queued += n
+		}
+	}
+	return queued
+}
+
+// AccountMappings — усі збережені мапінги банківських рахунків.
+func (s *MappingService) AccountMappings(ctx context.Context) ([]domain.AccountMapping, error) {
+	return s.accounts.ListMappings(ctx)
 }
 
 // UnmappedKeys — ключі, які зустрічались у транзакціях без мапінгу,

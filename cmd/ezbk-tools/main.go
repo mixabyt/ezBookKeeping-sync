@@ -33,7 +33,10 @@ func main() {
 	db, err := sqlite.Open(cfg.DBDatabase)
 	if err != nil {
 		logger.Error("open db error", "err", err)
-		return
+		cleanup()
+		// ненульовий код: інакше systemd покаже "Deactivated successfully"
+		// і зі статусу не буде видно, що сервіс не піднявся
+		os.Exit(1)
 	}
 
 	jobs := sqlite.NewJob(db)

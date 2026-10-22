@@ -40,21 +40,7 @@ func (c *Category) EzCategoryRuleByMCC(ctx context.Context, mcc int) (*domain.MC
 		LIMIT 1
 	`
 
-	var rule domain.MCCCategoryRule
-	var direction string
-	var enabled int
-	var categoryID int64
-
-	err := c.db.QueryRowContext(ctx, query, mcc, mcc).Scan(
-		&rule.ID,
-		&rule.MCCFrom,
-		&rule.MCCTo,
-		&direction,
-		&rule.Priority,
-		&categoryID,
-		&enabled,
-		&rule.Note,
-	)
+	rule, err := scanRule(c.db.QueryRowContext(ctx, query, mcc, mcc))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -63,11 +49,85 @@ func (c *Category) EzCategoryRuleByMCC(ctx context.Context, mcc int) (*domain.MC
 		return nil, err
 	}
 
+	return rule, nil
+}
+
+// ruleColumns — порядок колонок, який очікує scanRule.
+const ruleColumns = `id, mcc_from, mcc_to, direction, priority, ezb_category_id, enabled, note`
+
+// scanRule читає один рядок mcc_category_rules (колонки — ruleColumns).
+// Підходить і для *sql.Row, і для *sql.Rows.
+func scanRule(row interface{ Scan(dest ...any) error }) (*domain.MCCCategoryRule, error) {
+	var rule domain.MCCCategoryRule
+	var direction string
+	var enabled int
+	var categoryID int64
+
+	if err := row.Scan(
+		&rule.ID,
+		&rule.MCCFrom,
+		&rule.MCCTo,
+		&direction,
+		&rule.Priority,
+		&categoryID,
+		&enabled,
+		&rule.Note,
+	); err != nil {
+		return nil, err
+	}
+
 	rule.Direction = domain.Direction(direction)
 	rule.EzbCategoryID = fmt.Sprint(categoryID)
 	rule.Enabled = enabled == 1
 
 	return &rule, nil
+}
+
+// ListRules — усі правила, включно з вимкненими, для сторінки мапінгів.
+func (c *Category) ListRules(ctx context.Context) ([]domain.MCCCategoryRule, error) {
+	query := `SELECT ` + ruleColumns + ` FROM mcc_category_rules ORDER BY mcc_from, mcc_to, direction`
+
+	rows, err := c.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("list mcc rules: %w", err)
+	}
+	defer rows.Close()
+
+	rules := make([]domain.MCCCategoryRule, 0)
+	for rows.Next() {
+		rule, err := scanRule(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan mcc rule: %w", err)
+		}
+		rules = append(rules, *rule)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate mcc rules: %w", err)
+	}
+	return rules, nil
+}
+
+// UpdateRule змінює категорію, enabled і нотатку правила.
+func (c *Category) UpdateRule(ctx context.Context, id int64, categoryID string, enabled bool, note string) (*domain.MCCCategoryRule, error) {
+	query := `
+		UPDATE mcc_category_rules
+		SET ezb_category_id = ?, enabled = ?, note = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+		RETURNING ` + ruleColumns
+
+	enabledInt := 0
+	if enabled {
+		enabledInt = 1
+	}
+
+	rule, err := scanRule(c.db.QueryRowContext(ctx, query, categoryID, enabledInt, note, id))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("%w: id %d", app.ErrRuleNotFound, id)
+		}
+		return nil, fmt.Errorf("update mcc rule %d: %w", id, err)
+	}
+	return rule, nil
 }
 
 func (c *Category) MccByBankCategory(ctx context.Context, source domain.Source, bankCategory string) (*domain.BankCategoryMCC, error) {

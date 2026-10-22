@@ -138,16 +138,75 @@ func (s *Server) createRule() gin.HandlerFunc {
 			"id", rule.ID, "mcc", rule.MCCFrom, "mcc_to", rule.MCCTo,
 			"direction", rule.Direction, "category_id", rule.EzbCategoryID, "queued", queued)
 
-		s.respondCreated(c, "", gin.H{"rule": RuleDTO{
-			ID:            rule.ID,
-			MCCFrom:       rule.MCCFrom,
-			MCCTo:         rule.MCCTo,
-			Direction:     string(rule.Direction),
-			Priority:      rule.Priority,
-			EzbCategoryID: rule.EzbCategoryID,
-			Enabled:       rule.Enabled,
-			Note:          rule.Note,
-		}, "queued": queued})
+		s.respondCreated(c, "", gin.H{"rule": ruleToDTO(*rule), "queued": queued})
+	}
+}
+
+func ruleToDTO(rule domain.MCCCategoryRule) RuleDTO {
+	return RuleDTO{
+		ID:            rule.ID,
+		MCCFrom:       rule.MCCFrom,
+		MCCTo:         rule.MCCTo,
+		Direction:     string(rule.Direction),
+		Priority:      rule.Priority,
+		EzbCategoryID: rule.EzbCategoryID,
+		Enabled:       rule.Enabled,
+		Note:          rule.Note,
+	}
+}
+
+// listRules — GET /api/rules: усі правила, включно з вимкненими.
+func (s *Server) listRules() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		rules, err := s.mappingService.Rules(c.Request.Context())
+		if err != nil {
+			logctx.From(c.Request.Context()).Error("не вдалося отримати правила", "err", err)
+			s.respondError(c, err)
+			return
+		}
+
+		items := make([]RuleDTO, 0, len(rules))
+		for _, rule := range rules {
+			items = append(items, ruleToDTO(rule))
+		}
+		s.respondOK(c, gin.H{"items": items, "count": len(items)})
+	}
+}
+
+// UpdateRuleRequest — тіло PUT /api/rules/:id. Діапазон і напрямок не змінюються.
+type UpdateRuleRequest struct {
+	EzbCategoryID string `json:"ezb_category_id" binding:"required"`
+	Enabled       bool   `json:"enabled"`
+	Note          string `json:"note"`
+}
+
+// updateRule — PUT /api/rules/:id: інша категорія, увімкнути/вимкнути, нотатка.
+func (s *Server) updateRule() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+		if err != nil || id <= 0 {
+			s.errorResponse(c, http.StatusBadRequest, errBadID)
+			return
+		}
+
+		var req UpdateRuleRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			s.respondError(c, err)
+			return
+		}
+
+		rule, queued, err := s.mappingService.UpdateRule(c.Request.Context(), id, req.EzbCategoryID, req.Enabled, req.Note)
+		if err != nil {
+			logctx.From(c.Request.Context()).Warn("не вдалося оновити правило", "id", id, "err", err)
+			s.respondError(c, err)
+			return
+		}
+
+		logctx.From(c.Request.Context()).Info("оновлено правило",
+			"id", rule.ID, "mcc", rule.MCCFrom, "mcc_to", rule.MCCTo, "direction", rule.Direction,
+			"category_id", rule.EzbCategoryID, "enabled", rule.Enabled, "queued", queued)
+
+		s.respondOK(c, gin.H{"rule": ruleToDTO(*rule), "queued": queued})
 	}
 }
 
@@ -250,6 +309,37 @@ func (s *Server) unmappedAccounts() gin.HandlerFunc {
 				BankAccountID: w.BankAccountID,
 				WaitingJobs:   w.WaitingJobs,
 				SampleDesc:    w.SampleDesc,
+			})
+		}
+		s.respondOK(c, gin.H{"items": items, "count": len(items)})
+	}
+}
+
+// AccountMappingDTO — збережений мапінг банківського рахунку.
+type AccountMappingDTO struct {
+	Source        string `json:"source"`
+	BankAccountID string `json:"bank_account_id"`
+	EzbAccountID  string `json:"ezb_account_id"`
+	Name          string `json:"name"`
+}
+
+// listAccountMappings — GET /api/account-mappings. Редагування — тим самим POST (upsert).
+func (s *Server) listAccountMappings() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		mappings, err := s.mappingService.AccountMappings(c.Request.Context())
+		if err != nil {
+			logctx.From(c.Request.Context()).Error("не вдалося отримати мапінги рахунків", "err", err)
+			s.respondError(c, err)
+			return
+		}
+
+		items := make([]AccountMappingDTO, 0, len(mappings))
+		for _, m := range mappings {
+			items = append(items, AccountMappingDTO{
+				Source:        string(m.Source),
+				BankAccountID: m.BankAccountID,
+				EzbAccountID:  m.EzbAccountID,
+				Name:          m.Name,
 			})
 		}
 		s.respondOK(c, gin.H{"items": items, "count": len(items)})
