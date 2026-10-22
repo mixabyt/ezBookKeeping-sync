@@ -1,0 +1,36 @@
+name: release
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Check
+        run: |
+          go vet ./...
+          go test ./...
+
+      - name: Build
+        run: |
+          mkdir -p out
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o out/ezbk-tool ./cmd/ezbk-tools
+          cp -r database/migrations out/migrations
+          tar -C out -czf ezbk-tool.tar.gz .
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="build-${{ github.run_number }}"
+          gh release create "$TAG" ezbk-tool.tar.gz --title "$TAG" --notes "${{ github.sha }}"
