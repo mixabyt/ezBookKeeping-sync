@@ -20,7 +20,8 @@ func NewJob(db *sql.DB) *Job {
 
 func (j *Job) Add(ctx context.Context, tx *domain.BankTransaction) error {
 	query := `INSERT INTO jobs (tx_id, account_id, tx_time, amount, mcc, description, hold, source)
-			  VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+			  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			  ON CONFLICT (source, tx_id) DO NOTHING`
 
 	_, err := j.db.ExecContext(ctx, query,
 		tx.ID,

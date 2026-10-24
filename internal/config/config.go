@@ -13,6 +13,8 @@ type Config struct {
 	// MonobankApiKey — лише для ручної реєстрації вебхука (POST /personal/webhook);
 	// для перевірки підпису він не потрібен, ключ банку публічний.
 	MonobankApiKey string `env:"MONOBANK_API_KEY"`
+	// MonoSpoolURL — черга вебхуків на VPS, які прийшли, поки сервер лежав; порожньо — не забирати.
+	MonoSpoolURL string `env:"MONO_SPOOL_URL"`
 
 	EzBookKeepingKey     string `env:"EZ_BOOK_KEEPING_KEY"`
 	EzBookKeepingBaseURL string `env:"EZ_BOOK_KEEPING_BASE_URL"`
@@ -45,6 +47,7 @@ func NewConfig() *Config {
 	}
 	return &Config{
 		MonobankApiKey:       os.Getenv("MONOBANK_API_KEY"),
+		MonoSpoolURL:         os.Getenv("MONO_SPOOL_URL"),
 		EzBookKeepingKey:     os.Getenv("EZ_BOOK_KEEPING_KEY"),
 		EzBookKeepingBaseURL: os.Getenv("EZ_BOOK_KEEPING_BASE_URL"),
 		DBDatabase:           os.Getenv("DB_DATABASE"),

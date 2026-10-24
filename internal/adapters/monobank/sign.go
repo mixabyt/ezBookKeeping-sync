@@ -47,12 +47,6 @@ var (
 // Перевіряти треба ДО парсингу JSON: будь-яка нормалізація (порядок полів,
 // пробіли) змінює байти, і підпис перестає сходитись.
 func CheckSign(r *http.Request) (bool, error) {
-	pub, err := pubKeyFor(r.Context(), r.Header.Get("X-Key-Id"))
-	if err != nil {
-		logctx.From(r.Context()).Error("Помилка отримання публічного ключа", "err", err)
-		return false, err
-	}
-
 	raw, err := io.ReadAll(io.LimitReader(r.Body, maxBody))
 	if err != nil {
 		logctx.From(r.Context()).Error("Помилка при читання request body", "err", err)
@@ -61,7 +55,19 @@ func CheckSign(r *http.Request) (bool, error) {
 
 	r.Body = io.NopCloser(bytes.NewReader(raw))
 
-	sign := r.Header.Get("X-Sign")
+	return Verify(r.Context(), r.Header, raw)
+}
+
+// Verify — та сама перевірка, що й CheckSign, але на вже прочитаному тілі.
+// Для вебхуків, які nginx зберіг у чергу: raw — байти тіла як є, без перекодування.
+func Verify(ctx context.Context, header http.Header, raw []byte) (bool, error) {
+	pub, err := pubKeyFor(ctx, header.Get("X-Key-Id"))
+	if err != nil {
+		logctx.From(ctx).Error("Помилка отримання публічного ключа", "err", err)
+		return false, err
+	}
+
+	sign := header.Get("X-Sign")
 	if sign == "" {
 		return false, ErrNoSignature
 	}
@@ -69,8 +75,8 @@ func CheckSign(r *http.Request) (bool, error) {
 	// підпис: base64 → рівно 64 байти, r = перші 32, s = останні 32 (не DER!)
 	sig, err := base64.StdEncoding.DecodeString(sign)
 	if err != nil || len(sig) != 64 {
-		logctx.From(r.Context()).Warn("некоректний X-Sign",
-			"err", err, "len", len(sig), "key_id", r.Header.Get("X-Key-Id"))
+		logctx.From(ctx).Warn("некоректний X-Sign",
+			"err", err, "len", len(sig), "key_id", header.Get("X-Key-Id"))
 		return false, ErrBadSignatureFormat
 	}
 
@@ -83,8 +89,8 @@ func CheckSign(r *http.Request) (bool, error) {
 	hash := sha256.Sum256(raw)
 	ok := ecdsa.NewSignature(&rScalar, &sScalar).Verify(hash[:], pub)
 	if !ok {
-		logctx.From(r.Context()).Warn("підпис вебхука не пройшов перевірку",
-			"key_id", r.Header.Get("X-Key-Id"), "body_len", len(raw))
+		logctx.From(ctx).Warn("підпис вебхука не пройшов перевірку",
+			"key_id", header.Get("X-Key-Id"), "body_len", len(raw))
 	}
 	return ok, nil
 }
