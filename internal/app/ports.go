@@ -29,6 +29,9 @@ type JobRepository interface {
 	// Confirm — needs_review → pending з обраною категорією.
 	// Джоба вже не на підтвердженні — ErrJobNotReviewable.
 	Confirm(ctx context.Context, id int64, categoryID string) error
+	// Skip — needs_review → skipped; повертає, скільки джоб реально пропущено
+	// (решту вже підтвердили чи обробили).
+	Skip(ctx context.Context, ids []int64) (int64, error)
 }
 
 // SettingsRepository — налаштування, що змінюються з PWA.

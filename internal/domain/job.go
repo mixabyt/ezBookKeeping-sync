@@ -12,6 +12,9 @@ const (
 	JobNeedsReview JobStatus = "needs_review"
 	JobDone        JobStatus = "done"
 	JobFailed      JobStatus = "failed"
+	// JobSkipped — людина «видалила» транзакцію: в ezBookkeeping вона не піде.
+	// Рядок лишається навмисно — UNIQUE (source, tx_id) не дасть повтору вебхука створити її знову.
+	JobSkipped JobStatus = "skipped"
 )
 
 // WaitingKey — за чим групуються джоби, що чекають правила категорії.

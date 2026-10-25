@@ -83,7 +83,11 @@ The project uses Hexagonal / Ports & Adapters. Dependencies point inward: `adapt
    - If the category or account is missing, the job goes to `waiting_mapping` with the reason in `last_error`. Only real errors set `failed`.
    - After a successful write to ezBookkeeping, `MarkDone` stores the category that was used. That column feeds the PWA's "same as last time" suggestion.
 
-Job statuses: `pending → done | failed | waiting_mapping | needs_review`. `needs_review` goes back to `pending` on confirm, and the UPDATE is guarded by status so a double tap can't send twice.
+Job statuses: `pending → done | failed | waiting_mapping | needs_review`.
+- `needs_review` goes back to `pending` on confirm, and the UPDATE is guarded by status so a double tap can't send twice.
+- `needs_review` can also become `skipped` when a person "deletes" a transaction in the PWA (`POST /api/jobs/skip`, single or bulk).
+  - **Deletion is a status, never a `DELETE`.** The row must stay so that `UNIQUE (source, tx_id)` ignores a repeated webhook or a spool replay of the same transaction.
+  - `MarkWaiting` / `MarkNeedsReview` skip `skipped` rows, so the worker can't revive a job deleted mid-pass.
 
 ### Spool (webhooks received while the home server was down)
 

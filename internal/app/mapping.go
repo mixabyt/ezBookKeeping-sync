@@ -21,6 +21,16 @@ var ErrRuleNotFound = errors.New("правило не знайдено")
 // (друга вкладка, подвійний тап) або режим змінився і вона пішла сама. Адаптер віддає 409.
 var ErrJobNotReviewable = errors.New("транзакція вже не чекає підтвердження")
 
+// maxSkipJobs — скільки транзакцій можна видалити одним запитом:
+// SQLite обмежує кількість параметрів, а більше на екрані однаково не буває.
+const maxSkipJobs = 500
+
+// ErrNoJobsSelected / ErrTooManyJobs — некоректний вибір транзакцій для видалення (адаптер віддає 400).
+var (
+	ErrNoJobsSelected = errors.New("не вибрано жодної транзакції")
+	ErrTooManyJobs    = fmt.Errorf("забагато транзакцій за раз (максимум %d)", maxSkipJobs)
+)
+
 // MappingService — сценарії ручного мапінгу: що лишилось замапити і створення мапінгів.
 // Окремо від SyncService навмисно: там гарячий шлях транзакції, тут — робота людини через UI.
 // Після кожного нового мапінгу будить воркер, щоб джоби, які на нього чекали, рушили одразу.
@@ -191,6 +201,35 @@ func (s *MappingService) ConfirmJob(ctx context.Context, id int64, categoryID st
 	}
 	s.waker.Wake()
 	return nil
+}
+
+// SkipJobs — людина «видалила» транзакції на підтвердженні: в ezBookkeeping вони не підуть.
+// Повертає, скільки реально пропущено і скільки різних id просили; різниця — ті,
+// що вже підтвердили з іншого пристрою. Воркер не будимо — відправляти нічого.
+func (s *MappingService) SkipJobs(ctx context.Context, ids []int64) (skipped, requested int, err error) {
+	unique := make([]int64, 0, len(ids))
+	seen := make(map[int64]bool, len(ids))
+	for _, id := range ids {
+		if !seen[id] {
+			seen[id] = true
+			unique = append(unique, id)
+		}
+	}
+	if len(unique) == 0 {
+		return 0, 0, ErrNoJobsSelected
+	}
+	if len(unique) > maxSkipJobs {
+		return 0, 0, ErrTooManyJobs
+	}
+
+	n, err := s.jobs.Skip(ctx, unique)
+	if err != nil {
+		return 0, 0, err
+	}
+	if n == 0 {
+		return 0, 0, ErrJobNotReviewable
+	}
+	return int(n), len(unique), nil
 }
 
 // EzCategories — довідник категорій ezBookkeeping для випадайки в UI.

@@ -85,6 +85,7 @@ func (s *Server) init() {
 	secured.PUT("/merchant-rules/:id", s.updateMerchantRule())
 	secured.GET("/review", s.reviewQueue())
 	secured.POST("/jobs/:id/confirm", s.confirmJob())
+	secured.POST("/jobs/skip", s.skipJobs())
 	secured.GET("/categories", s.ezCategories())
 	secured.GET("/accounts", s.ezAccounts())
 	secured.GET("/unmapped-accounts", s.unmappedAccounts())

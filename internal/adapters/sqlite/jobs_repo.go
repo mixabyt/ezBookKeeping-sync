@@ -131,9 +131,11 @@ func (j *Job) MarkFailed(ctx context.Context, id int64, err error) error {
 
 // MarkWaiting — джобі бракує мапінгу. reason кладемо в last_error, щоб з БД
 // було видно, чого саме чекає джоба, без пошуку по логах.
+// status <> skipped: воркер міг узяти джобу до того, як людина її видалила, —
+// без цієї умови він повернув би її з мертвих.
 func (j *Job) MarkWaiting(ctx context.Context, id int64, reason string) error {
-	query := `UPDATE jobs SET status = ?, last_error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-	_, err := j.db.ExecContext(ctx, query, domain.JobWaitingMapping, reason, id)
+	query := `UPDATE jobs SET status = ?, last_error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status <> ?`
+	_, err := j.db.ExecContext(ctx, query, domain.JobWaitingMapping, reason, id, domain.JobSkipped)
 	if err != nil {
 		return fmt.Errorf("mark waiting job %d: %w", id, err)
 	}
@@ -197,9 +199,10 @@ func (j *Job) WaitingAccounts(ctx context.Context) ([]domain.WaitingAccount, err
 }
 
 // MarkNeedsReview — режим manual: категорію має підтвердити людина.
+// status <> skipped — з тієї ж причини, що в MarkWaiting.
 func (j *Job) MarkNeedsReview(ctx context.Context, id int64) error {
-	query := `UPDATE jobs SET status = ?, last_error = '', updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-	_, err := j.db.ExecContext(ctx, query, domain.JobNeedsReview, id)
+	query := `UPDATE jobs SET status = ?, last_error = '', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status <> ?`
+	_, err := j.db.ExecContext(ctx, query, domain.JobNeedsReview, id, domain.JobSkipped)
 	if err != nil {
 		return fmt.Errorf("mark needs review job %d: %w", id, err)
 	}
@@ -219,6 +222,34 @@ func (j *Job) Confirm(ctx context.Context, id int64, categoryID string) error {
 		return fmt.Errorf("%w: id %d", app.ErrJobNotReviewable, id)
 	}
 	return nil
+}
+
+// Skip — needs_review → skipped для кількох джоб; повертає, скільки реально пропущено.
+// Умова на статус, як у Confirm: вже підтверджену (чи відправлену) транзакцію
+// «видалити» не вийде, а подвійний тап нічого не зламає.
+//
+// Лишається вузьке вікно: воркер узяв джобу до Skip, а режим уже не manual —
+// тоді він її відправить. Можливо лише при перемиканні режиму саме в цю мить.
+func (j *Job) Skip(ctx context.Context, ids []int64) (int64, error) {
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	query := `UPDATE jobs SET status = ?, updated_at = CURRENT_TIMESTAMP
+			  WHERE status = ? AND id IN (` + placeholders + `)`
+
+	args := make([]any, 0, len(ids)+2)
+	args = append(args, domain.JobSkipped, domain.JobNeedsReview)
+	for _, id := range ids {
+		args = append(args, id)
+	}
+
+	res, err := j.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, fmt.Errorf("skip jobs %v: %w", ids, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("skip jobs %v: %w", ids, err)
+	}
+	return n, nil
 }
 
 // WaitingMerchants — продавці (MCC + напрямок + опис), через яких стоять джоби.

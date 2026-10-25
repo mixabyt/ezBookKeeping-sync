@@ -252,6 +252,40 @@ func (s *Server) confirmJob() gin.HandlerFunc {
 	}
 }
 
+// SkipJobsRequest — тіло POST /api/jobs/skip. Без binding-тегів навмисно:
+// порожній список перевіряє app, і людина бачить українське повідомлення, а не текст валідатора.
+type SkipJobsRequest struct {
+	IDs []int64 `json:"ids"`
+}
+
+// skipJobs — POST /api/jobs/skip: «видалити» транзакції на підтвердженні — в ezBookkeeping
+// вони не підуть. Один ендпоінт і для однієї, і для кількох. POST, а не DELETE:
+// рядки лишаються в БД (статус skipped), а DELETE з тілом підтримується погано.
+func (s *Server) skipJobs() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req SkipJobsRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			s.respondError(c, err)
+			return
+		}
+		for _, id := range req.IDs {
+			if id <= 0 {
+				s.errorResponse(c, http.StatusBadRequest, errBadID)
+				return
+			}
+		}
+
+		skipped, requested, err := s.mappingService.SkipJobs(c.Request.Context(), req.IDs)
+		if err != nil {
+			logctx.From(c.Request.Context()).Warn("не вдалося видалити транзакції", "ids", req.IDs, "err", err)
+			s.respondError(c, err)
+			return
+		}
+		logctx.From(c.Request.Context()).Info("транзакції видалено", "ids", req.IDs, "skipped", skipped)
+		s.respondOK(c, gin.H{"skipped": skipped, "requested": requested})
+	}
+}
+
 // pathID — додатний :id зі шляху; інакше відповідає 400 і повертає false.
 func (s *Server) pathID(c *gin.Context) (int64, bool) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)

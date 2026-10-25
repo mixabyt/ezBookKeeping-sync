@@ -93,7 +93,9 @@ func classifyError(err error) (int, string) {
 		errors.Is(err, domain.ErrEmptyCategory),
 		errors.Is(err, domain.ErrEmptyDescription),
 		errors.Is(err, domain.ErrInvalidMode),
-		errors.Is(err, domain.ErrInvalidAccountMapping):
+		errors.Is(err, domain.ErrInvalidAccountMapping),
+		errors.Is(err, app.ErrNoJobsSelected),
+		errors.Is(err, app.ErrTooManyJobs):
 		return http.StatusBadRequest, codeValidationError
 	case errors.Is(err, app.ErrRuleExists), errors.Is(err, app.ErrJobNotReviewable):
 		return http.StatusConflict, codeConflict

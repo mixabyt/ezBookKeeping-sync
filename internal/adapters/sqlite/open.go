@@ -51,7 +51,7 @@ func Open(path string) (*sql.DB, error) {
 
 // requiredSchemaVersion — остання міграція в database/migrations, без якої код не працює.
 // Піднімати разом з кожною новою міграцією.
-const requiredSchemaVersion = 7
+const requiredSchemaVersion = 8
 
 // checkSchema не дає стартувати на БД без міграцій. Відсутній файл SQLite створює
 // порожнім, і без цієї перевірки сервіс "успішно" запускався б, а кожен запит

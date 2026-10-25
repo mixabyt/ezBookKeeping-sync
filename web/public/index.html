@@ -115,6 +115,20 @@
   @media (hover: hover) { .picker li:hover { background: #1f2733; } }
   .picker li .parent { color: var(--muted); font-size: 12px; display: block; }
   .picker li.none { color: var(--muted); cursor: default; }
+  button.danger { background: var(--err); border-color: var(--err); }
+  button.ghost.danger { background: transparent; color: var(--err); border-color: #43272b; }
+  .card.checked { border-color: var(--accent); }
+  .select-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+  .modal-backdrop {
+    position: fixed; inset: 0; z-index: 10; background: rgba(0,0,0,.6);
+    display: flex; align-items: center; justify-content: center;
+    padding: 16px 16px calc(16px + env(safe-area-inset-bottom));
+  }
+  .modal { width: 100%; max-width: 420px; margin: 0; }
+  .modal h3 { margin: 0 0 8px; font-size: 17px; }
+  .modal p { margin: 0 0 16px; color: var(--muted); font-size: 14px; }
+  .modal .actions { display: flex; gap: 8px; justify-content: flex-end; }
+  .modal .actions button { width: auto; padding: 9px 18px; }
 </style>
 </head>
 <body>
@@ -223,10 +237,27 @@
 
           <!-- режим manual: картка на транзакцію з пропозицією -->
           <template v-if="mode === 'manual'">
-            <h2 v-if="review.length">На підтвердження</h2>
-            <div v-for="item in review" :key="item.id" class="card">
+            <div v-if="review.length" class="spread">
+              <h2>На підтвердження</h2>
+              <button class="ghost" @click="toggleSelectMode">{{ selectMode ? 'Скасувати вибір' : 'Вибрати' }}</button>
+            </div>
+            <!-- режим вибору: масове видалення -->
+            <div v-if="selectMode && review.length" class="select-bar">
+              <label class="check">
+                <input type="checkbox" :checked="allChecked" @change="checkAll($event.target.checked)">
+                Вибрати всі
+              </label>
+              <span style="flex:1"></span>
+              <button class="danger" style="width:auto;padding:9px 18px" :disabled="!checkedIds.length" @click="askSkipChecked">
+                Видалити вибрані ({{ checkedIds.length }})
+              </button>
+            </div>
+            <div v-for="item in review" :key="item.id" class="card" :class="{ checked: selectMode && checked[item.id] }">
               <div class="spread">
-                <span class="key">{{ item.description || '(без опису)' }}</span>
+                <label v-if="selectMode" class="check" style="flex:0 0 auto">
+                  <input type="checkbox" v-model="checked[item.id]" :aria-label="'Вибрати ' + (item.description || 'транзакцію')">
+                </label>
+                <span class="key" style="flex:1">{{ item.description || '(без опису)' }}</span>
                 <span class="amount" :class="item.direction">{{ money(item.amount) }}</span>
               </div>
               <div class="meta">{{ txDate(item.tx_time) }} · MCC {{ item.mcc }} · {{ dirLabel(item.direction) }}</div>
@@ -235,9 +266,12 @@
               <div style="height:10px"></div>
               <div class="spread">
                 <span class="muted">{{ suggestionNote(item) }}</span>
-                <button style="width:auto;padding:9px 18px" :disabled="!reviewSelection[item.id] || saving === 'job:' + item.id" @click="confirmJob(item)">
-                  {{ saving === 'job:' + item.id ? '…' : 'Підтвердити' }}
-                </button>
+                <span class="row" style="flex:0 0 auto">
+                  <button class="ghost danger" style="padding:9px 14px" :disabled="!!saving" @click="askSkipOne(item)">Видалити</button>
+                  <button style="width:auto;padding:9px 18px" :disabled="!reviewSelection[item.id] || saving === 'job:' + item.id" @click="confirmJob(item)">
+                    {{ saving === 'job:' + item.id ? '…' : 'Підтвердити' }}
+                  </button>
+                </span>
               </div>
             </div>
           </template>
@@ -377,6 +411,8 @@
         </div>
       </template>
     </main>
+    <confirm-dialog v-if="dialog" :title="dialog.title" :text="dialog.text" confirm-label="Видалити"
+                    :busy="saving === 'skip'" @confirm="doSkip" @cancel="closeDialog"></confirm-dialog>
   </template>
 </div>
 
@@ -462,6 +498,36 @@ const CategoryPicker = {
     </div>`,
 };
 
+// Модальне «точно?» замість нативного confirm(): той у PWA на iOS виглядає чужим
+// і показує адресу сайту в заголовку. Закривається Escape, тапом по фону чи «Скасувати»;
+// поки йде запит (busy) — не закривається, щоб результат не загубився.
+const ConfirmDialog = {
+  props: {
+    title: { type: String, default: '' },
+    text: { type: String, default: '' },
+    confirmLabel: { type: String, default: 'Так' },
+    busy: { type: Boolean, default: false },
+  },
+  emits: ['confirm', 'cancel'],
+  mounted() { document.addEventListener('keydown', this.onKey); },
+  unmounted() { document.removeEventListener('keydown', this.onKey); },
+  methods: {
+    cancel() { if (!this.busy) this.$emit('cancel'); },
+    onKey(event) { if (event.key === 'Escape') this.cancel(); },
+  },
+  template: `
+    <div class="modal-backdrop" @click.self="cancel">
+      <div class="card modal" role="dialog" aria-modal="true">
+        <h3>{{ title }}</h3>
+        <p>{{ text }}</p>
+        <div class="actions">
+          <button class="ghost" :disabled="busy" @click="cancel">Скасувати</button>
+          <button class="danger" :disabled="busy" @click="$emit('confirm')">{{ busy ? '…' : confirmLabel }}</button>
+        </div>
+      </div>
+    </div>`,
+};
+
 const app = createApp({
   setup() {
     // null — ще не знаємо, чи є сесія; false — показуємо логін; true — робочий екран
@@ -490,6 +556,10 @@ const app = createApp({
     const merchantApplyAll = reactive({});
     const review = ref([]);                 // режим manual
     const reviewSelection = reactive({});
+    // видалення: режим вибору для масового, позначені id і відкритий діалог
+    const selectMode = ref(false);
+    const checked = reactive({});           // id → true
+    const dialog = ref(null);               // null | { title, text, ids }
 
     // режим мапінгу: з налаштувань, вантажиться разом із «Чекають»
     const mode = ref('mcc');
@@ -524,7 +594,9 @@ const app = createApp({
       review.value = [];
       merchantRules.value = [];
       [selection, accountSelection, accountNames, ruleEdits, accEdits,
-       merchantSelection, merchantApplyAll, reviewSelection, merchantEdits].forEach(clear);
+       merchantSelection, merchantApplyAll, reviewSelection, merchantEdits, checked].forEach(clear);
+      selectMode.value = false;
+      dialog.value = null;
       notice.value = '';
     }
 
@@ -665,6 +737,10 @@ const app = createApp({
         if (!(item.id in reviewSelection)) reviewSelection[item.id] = item.suggested_category_id;
       });
       review.value = reviewRes.items;
+      // позначені, яких уже немає (підтвердили з іншого пристрою), не мають потрапити у «Видалити вибрані»
+      const present = new Set(reviewRes.items.map((item) => item.id));
+      Object.keys(checked).forEach((id) => { if (!present.has(Number(id))) delete checked[id]; });
+      if (!reviewRes.items.length) selectMode.value = false;
     }
 
     async function loadSettings() {
@@ -712,7 +788,8 @@ const app = createApp({
     const refreshing = ref(false);
     let refreshError = false; // помилку саме оновлення прибираємо при наступному успіху, чужу — ні
     async function refresh() {
-      if (!authed.value || view.value !== 'pending' || saving.value || loading.value || refreshing.value) return;
+      // і не під відкритим діалогом: текст «Видалити N транзакцій» має відповідати списку під ним
+      if (!authed.value || view.value !== 'pending' || saving.value || loading.value || refreshing.value || dialog.value) return;
       refreshing.value = true;
       try {
         await loadPending();
@@ -890,6 +967,48 @@ const app = createApp({
       return `«${item.description || 'Транзакцію'}» підтверджено: ${categoryName(category)}`;
     });
 
+    // видалення: транзакція не піде в ezBookkeeping (на сервері — статус skipped, рядок лишається,
+    // тож повтор того самого вебхука її не поверне)
+    const checkedIds = computed(() => review.value.filter((item) => checked[item.id]).map((item) => item.id));
+    const allChecked = computed(() => review.value.length > 0 && checkedIds.value.length === review.value.length);
+    function checkAll(on) {
+      clear(checked);
+      if (on) review.value.forEach((item) => { checked[item.id] = true; });
+    }
+    function toggleSelectMode() {
+      selectMode.value = !selectMode.value;
+      clear(checked);
+    }
+    function askSkipOne(item) {
+      dialog.value = {
+        title: 'Видалити транзакцію?',
+        text: `«${item.description || 'Без опису'}» ${money(item.amount)} не піде в ezBookkeeping.`,
+        ids: [item.id],
+      };
+    }
+    function askSkipChecked() {
+      const items = review.value.filter((item) => checked[item.id]);
+      if (!items.length) return;
+      const total = items.reduce((sum, item) => sum + item.amount, 0);
+      dialog.value = {
+        title: `Видалити ${items.length} ${pluralTx(items.length)}?`,
+        text: `Разом ${money(total)}. Вони не підуть в ezBookkeeping.`,
+        ids: items.map((item) => item.id),
+      };
+    }
+    const closeDialog = () => { dialog.value = null; };
+    const doSkip = () => {
+      const ids = dialog.value.ids;
+      return save('skip', async () => {
+        const res = await api('api/jobs/skip', { method: 'POST', body: JSON.stringify({ ids }) });
+        ids.forEach((id) => { delete checked[id]; delete reviewSelection[id]; });
+        if (ids.length > 1) selectMode.value = false;
+        dialog.value = null;
+        const rest = res.requested - res.skipped;
+        return `Видалено ${res.skipped} ${pluralTx(res.skipped)}` + (rest ? `, ${rest} вже оброблено раніше` : '');
+      }).finally(() => { dialog.value = null; });
+    };
+
     const updateMerchantRule = (rule) => save('merchant:' + rule.id, async () => {
       const edit = merchantEdits[rule.id];
       const res = await api(`api/merchant-rules/${rule.id}`, {
@@ -932,12 +1051,15 @@ const app = createApp({
              mode, modeDraft, modeOptions, modeTitle, pendingCount, saveMode,
              waitingMerchants, merchantSelection, merchantApplyAll, merchId, saveMerchant,
              review, reviewSelection, money, txDate, suggestionNote, confirmJob,
+             selectMode, checked, checkedIds, allChecked, checkAll, toggleSelectMode,
+             dialog, askSkipOne, askSkipChecked, closeDialog, doSkip,
              merchantRules, merchantEdits, filteredMerchantRules, merchantDirty, updateMerchantRule,
              rowId, accId, dirLabel, mccRange, plural, pluralTx, waits, categoriesFor,
              categoryById, categoryName, accountLabel, accountById, accountName, ruleDirty, accDirty };
   },
 });
 app.component('category-picker', CategoryPicker);
+app.component('confirm-dialog', ConfirmDialog);
 app.mount('#app');
 
 // iOS Safari ігнорує user-scalable=no (заради доступності), тож pinch-zoom гасимо подією
