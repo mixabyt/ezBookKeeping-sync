@@ -18,12 +18,13 @@ func NewJob(db *sql.DB) *Job {
 	return &Job{db}
 }
 
-func (j *Job) Add(ctx context.Context, tx *domain.BankTransaction) error {
-	query := `INSERT INTO jobs (tx_id, account_id, tx_time, amount, mcc, description, hold, source)
-			  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-			  ON CONFLICT (source, tx_id) DO NOTHING`
+func (j *Job) Add(ctx context.Context, userID int64, tx *domain.BankTransaction) error {
+	query := `INSERT INTO jobs (user_id, tx_id, account_id, tx_time, amount, mcc, description, hold, source)
+			  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			  ON CONFLICT (user_id, source, tx_id) DO NOTHING`
 
 	_, err := j.db.ExecContext(ctx, query,
+		userID,
 		tx.ID,
 		tx.AccountID,
 		tx.Time.Unix(),
@@ -40,34 +41,43 @@ func (j *Job) Add(ctx context.Context, tx *domain.BankTransaction) error {
 }
 
 func (j *Job) FetchPending(ctx context.Context, limit int) ([]domain.Job, error) {
-	return j.fetchByStatus(ctx, 0, limit, domain.JobPending)
+	return j.fetchByStatus(ctx, nil, 0, limit, domain.JobPending)
 }
 
 // FetchWaiting — джоби, яким бракувало мапінгу або підтвердження. Воркер перебирає їх
 // на кожному тіку: людина могла домапити категорію й рахунок або змінити режим.
 func (j *Job) FetchWaiting(ctx context.Context, afterID int64, limit int) ([]domain.Job, error) {
-	return j.fetchByStatus(ctx, afterID, limit, domain.JobWaitingMapping, domain.JobNeedsReview)
+	return j.fetchByStatus(ctx, nil, afterID, limit, domain.JobWaitingMapping, domain.JobNeedsReview)
 }
 
-// ListNeedsReview — усі джоби на підтвердження, найстаріші першими.
-func (j *Job) ListNeedsReview(ctx context.Context) ([]domain.Job, error) {
-	return j.fetchByStatus(ctx, 0, -1, domain.JobNeedsReview) // LIMIT -1 у SQLite — без обмеження
+// ListNeedsReview — усі джоби користувача на підтвердження, найстаріші першими.
+func (j *Job) ListNeedsReview(ctx context.Context, userID int64) ([]domain.Job, error) {
+	return j.fetchByStatus(ctx, &userID, 0, -1, domain.JobNeedsReview) // LIMIT -1 у SQLite — без обмеження
 }
 
-func (j *Job) fetchByStatus(ctx context.Context, afterID int64, limit int, statuses ...domain.JobStatus) ([]domain.Job, error) {
+// fetchByStatus — onlyUser == nil означає всіх користувачів (так працює воркер).
+func (j *Job) fetchByStatus(ctx context.Context, onlyUser *int64, afterID int64, limit int, statuses ...domain.JobStatus) ([]domain.Job, error) {
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(statuses)), ",")
-	query := `SELECT id, tx_id, account_id, tx_time, amount, mcc, description, hold,
+	userCondition := ""
+	if onlyUser != nil {
+		userCondition = "AND user_id = ?"
+	}
+	query := `SELECT id, user_id, tx_id, account_id, tx_time, amount, mcc, description, hold,
 			         status, attempts, last_error, ezb_category_id, source
 			  FROM jobs
-			  WHERE status IN (` + placeholders + `) AND id > ?
+			  WHERE status IN (` + placeholders + `) AND id > ? ` + userCondition + `
 			  ORDER BY id
 			  LIMIT ?`
 
-	args := make([]any, 0, len(statuses)+2)
+	args := make([]any, 0, len(statuses)+3)
 	for _, status := range statuses {
 		args = append(args, status)
 	}
-	args = append(args, afterID, limit)
+	args = append(args, afterID)
+	if onlyUser != nil {
+		args = append(args, *onlyUser)
+	}
+	args = append(args, limit)
 
 	rows, err := j.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -83,6 +93,7 @@ func (j *Job) fetchByStatus(ctx context.Context, afterID int64, limit int, statu
 		)
 		if err := rows.Scan(
 			&job.ID,
+			&job.UserID,
 			&job.Tx.ID,
 			&job.Tx.AccountID,
 			&txTime,
@@ -144,12 +155,12 @@ func (j *Job) MarkWaiting(ctx context.Context, id int64, reason string) error {
 
 // WaitingCounts — скільки джоб чекає на кожну пару (MCC, напрямок).
 // Напрямок у jobs не зберігається: як і BankTransaction.Direction(), рахуємо його зі знаку суми.
-func (j *Job) WaitingCounts(ctx context.Context) (map[domain.WaitingKey]int, error) {
+func (j *Job) WaitingCounts(ctx context.Context, userID int64) (map[domain.WaitingKey]int, error) {
 	query := `SELECT mcc, amount < 0 AS is_expense, count(*)
 			  FROM jobs
-			  WHERE status = ?
+			  WHERE user_id = ? AND status = ?
 			  GROUP BY mcc, is_expense`
-	rows, err := j.db.QueryContext(ctx, query, domain.JobWaitingMapping)
+	rows, err := j.db.QueryContext(ctx, query, userID, domain.JobWaitingMapping)
 	if err != nil {
 		return nil, fmt.Errorf("waiting counts: %w", err)
 	}
@@ -175,13 +186,13 @@ func (j *Job) WaitingCounts(ctx context.Context) (map[domain.WaitingKey]int, err
 
 // WaitingAccounts — банківські рахунки, з яких є джоби в очікуванні.
 // Чи є для них мапінг, вирішує app: тут лише факт "з цього рахунку щось чекає".
-func (j *Job) WaitingAccounts(ctx context.Context) ([]domain.WaitingAccount, error) {
+func (j *Job) WaitingAccounts(ctx context.Context, userID int64) ([]domain.WaitingAccount, error) {
 	query := `SELECT source, account_id, count(*), max(description)
 			  FROM jobs
-			  WHERE status = ?
+			  WHERE user_id = ? AND status = ?
 			  GROUP BY source, account_id
 			  ORDER BY count(*) DESC`
-	rows, err := j.db.QueryContext(ctx, query, domain.JobWaitingMapping)
+	rows, err := j.db.QueryContext(ctx, query, userID, domain.JobWaitingMapping)
 	if err != nil {
 		return nil, fmt.Errorf("waiting accounts: %w", err)
 	}
@@ -211,10 +222,11 @@ func (j *Job) MarkNeedsReview(ctx context.Context, id int64) error {
 
 // Confirm — needs_review → pending з категорією, яку обрала людина. Умова на статус
 // у самому UPDATE: подвійний тап чи друга вкладка не відправлять транзакцію двічі.
-func (j *Job) Confirm(ctx context.Context, id int64, categoryID string) error {
+// Умова на user_id: підстановка чужого id не має підтверджувати чужу транзакцію.
+func (j *Job) Confirm(ctx context.Context, userID, id int64, categoryID string) error {
 	query := `UPDATE jobs SET status = ?, ezb_category_id = ?, updated_at = CURRENT_TIMESTAMP
-			  WHERE id = ? AND status = ?`
-	res, err := j.db.ExecContext(ctx, query, domain.JobPending, categoryID, id, domain.JobNeedsReview)
+			  WHERE id = ? AND user_id = ? AND status = ?`
+	res, err := j.db.ExecContext(ctx, query, domain.JobPending, categoryID, id, userID, domain.JobNeedsReview)
 	if err != nil {
 		return fmt.Errorf("confirm job %d: %w", id, err)
 	}
@@ -230,13 +242,13 @@ func (j *Job) Confirm(ctx context.Context, id int64, categoryID string) error {
 //
 // Лишається вузьке вікно: воркер узяв джобу до Skip, а режим уже не manual —
 // тоді він її відправить. Можливо лише при перемиканні режиму саме в цю мить.
-func (j *Job) Skip(ctx context.Context, ids []int64) (int64, error) {
+func (j *Job) Skip(ctx context.Context, userID int64, ids []int64) (int64, error) {
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
 	query := `UPDATE jobs SET status = ?, updated_at = CURRENT_TIMESTAMP
-			  WHERE status = ? AND id IN (` + placeholders + `)`
+			  WHERE status = ? AND user_id = ? AND id IN (` + placeholders + `)`
 
-	args := make([]any, 0, len(ids)+2)
-	args = append(args, domain.JobSkipped, domain.JobNeedsReview)
+	args := make([]any, 0, len(ids)+3)
+	args = append(args, domain.JobSkipped, domain.JobNeedsReview, userID)
 	for _, id := range ids {
 		args = append(args, id)
 	}
@@ -254,13 +266,13 @@ func (j *Job) Skip(ctx context.Context, ids []int64) (int64, error) {
 
 // WaitingMerchants — продавці (MCC + напрямок + опис), через яких стоять джоби.
 // trim у SQL — той самий ключ, що й merchantDescription в app.
-func (j *Job) WaitingMerchants(ctx context.Context) ([]domain.WaitingMerchant, error) {
+func (j *Job) WaitingMerchants(ctx context.Context, userID int64) ([]domain.WaitingMerchant, error) {
 	query := `SELECT mcc, amount < 0 AS is_expense, trim(description) AS merchant, count(*)
 			  FROM jobs
-			  WHERE status = ?
+			  WHERE user_id = ? AND status = ?
 			  GROUP BY mcc, is_expense, merchant
 			  ORDER BY count(*) DESC, max(id) DESC`
-	rows, err := j.db.QueryContext(ctx, query, domain.JobWaitingMapping)
+	rows, err := j.db.QueryContext(ctx, query, userID, domain.JobWaitingMapping)
 	if err != nil {
 		return nil, fmt.Errorf("waiting merchants: %w", err)
 	}

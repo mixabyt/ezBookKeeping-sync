@@ -65,7 +65,7 @@ func (s *Server) unmappedKeys() gin.HandlerFunc {
 			filter.Limit = limit
 		}
 
-		keys, err := s.mappingService.UnmappedKeys(c.Request.Context(), filter)
+		keys, err := s.mappingService.UnmappedKeys(c.Request.Context(), currentUserID(c),filter)
 		if err != nil {
 			logctx.From(c.Request.Context()).Error("не вдалося отримати unmapped keys", "err", err)
 			s.respondError(c, err)
@@ -118,7 +118,7 @@ func (s *Server) createRule() gin.HandlerFunc {
 			mccTo = *req.MCCTo
 		}
 
-		rule, queued, err := s.mappingService.CreateRule(c.Request.Context(), domain.MCCCategoryRule{
+		rule, queued, err := s.mappingService.CreateRule(c.Request.Context(), currentUserID(c),domain.MCCCategoryRule{
 			MCCFrom:       req.MCCFrom,
 			MCCTo:         mccTo,
 			Direction:     domain.Direction(req.Direction),
@@ -158,7 +158,7 @@ func ruleToDTO(rule domain.MCCCategoryRule) RuleDTO {
 // listRules — GET /api/rules: усі правила, включно з вимкненими.
 func (s *Server) listRules() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		rules, err := s.mappingService.Rules(c.Request.Context())
+		rules, err := s.mappingService.Rules(c.Request.Context(), currentUserID(c))
 		if err != nil {
 			logctx.From(c.Request.Context()).Error("не вдалося отримати правила", "err", err)
 			s.respondError(c, err)
@@ -194,7 +194,7 @@ func (s *Server) updateRule() gin.HandlerFunc {
 			return
 		}
 
-		rule, queued, err := s.mappingService.UpdateRule(c.Request.Context(), id, req.EzbCategoryID, req.Enabled, req.Note)
+		rule, queued, err := s.mappingService.UpdateRule(c.Request.Context(), currentUserID(c),id, req.EzbCategoryID, req.Enabled, req.Note)
 		if err != nil {
 			logctx.From(c.Request.Context()).Warn("не вдалося оновити правило", "id", id, "err", err)
 			s.respondError(c, err)
@@ -235,7 +235,7 @@ func (s *Server) ezCategories() gin.HandlerFunc {
 			return
 		}
 
-		categories, err := s.mappingService.EzCategories(c.Request.Context(), filter)
+		categories, err := s.mappingService.EzCategories(c.Request.Context(), currentUserID(c),filter)
 		if err != nil {
 			logctx.From(c.Request.Context()).Error("не вдалося отримати категорії ezBookkeeping", "err", err)
 			s.respondError(c, err)
@@ -268,7 +268,7 @@ type EzAccountDTO struct {
 // ezAccounts — GET /api/accounts: довідник рахунків ezBookkeeping (ключ лишається на сервері).
 func (s *Server) ezAccounts() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		accounts, err := s.mappingService.EzAccounts(c.Request.Context())
+		accounts, err := s.mappingService.EzAccounts(c.Request.Context(), currentUserID(c))
 		if err != nil {
 			logctx.From(c.Request.Context()).Error("не вдалося отримати рахунки ezBookkeeping", "err", err)
 			s.respondError(c, err)
@@ -294,7 +294,7 @@ type WaitingAccountDTO struct {
 // unmappedAccounts — GET /api/unmapped-accounts
 func (s *Server) unmappedAccounts() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		waiting, err := s.mappingService.WaitingAccounts(c.Request.Context())
+		waiting, err := s.mappingService.WaitingAccounts(c.Request.Context(), currentUserID(c))
 		if err != nil {
 			logctx.From(c.Request.Context()).Error("не вдалося отримати незамаплені рахунки", "err", err)
 			s.respondError(c, err)
@@ -325,7 +325,7 @@ type AccountMappingDTO struct {
 // listAccountMappings — GET /api/account-mappings. Редагування — тим самим POST (upsert).
 func (s *Server) listAccountMappings() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		mappings, err := s.mappingService.AccountMappings(c.Request.Context())
+		mappings, err := s.mappingService.AccountMappings(c.Request.Context(), currentUserID(c))
 		if err != nil {
 			logctx.From(c.Request.Context()).Error("не вдалося отримати мапінги рахунків", "err", err)
 			s.respondError(c, err)
@@ -369,7 +369,7 @@ func (s *Server) createAccountMapping() gin.HandlerFunc {
 			EzbAccountID:  req.EzbAccountID,
 			Name:          req.Name,
 		}
-		queued, err := s.mappingService.CreateAccountMapping(c.Request.Context(), mapping)
+		queued, err := s.mappingService.CreateAccountMapping(c.Request.Context(), currentUserID(c),mapping)
 		if err != nil {
 			logctx.From(c.Request.Context()).Warn("не вдалося зберегти мапінг рахунку",
 				"source", req.Source, "bank_account_id", req.BankAccountID, "err", err)

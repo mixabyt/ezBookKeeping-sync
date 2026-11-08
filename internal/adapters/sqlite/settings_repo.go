@@ -11,7 +11,7 @@ import (
 
 const settingMappingMode = "mapping_mode"
 
-// Settings — налаштування, що змінюються з PWA (таблиця settings, ключ-значення).
+// Settings — налаштування, що змінюються з PWA (таблиця settings, ключ-значення на користувача).
 type Settings struct {
 	db *sql.DB
 }
@@ -20,10 +20,10 @@ func NewSettings(db *sql.DB) *Settings {
 	return &Settings{db: db}
 }
 
-// MappingMode — рядка немає (БД змінили руками) → mcc, тобто поведінка як до режимів.
-func (s *Settings) MappingMode(ctx context.Context) (domain.MappingMode, error) {
+// MappingMode — рядка немає (новий користувач ще не обирав режим) → mcc.
+func (s *Settings) MappingMode(ctx context.Context, userID int64) (domain.MappingMode, error) {
 	var value string
-	err := s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, settingMappingMode).Scan(&value)
+	err := s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE user_id = ? AND key = ?`, userID, settingMappingMode).Scan(&value)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return domain.ModeMCC, nil
@@ -33,12 +33,12 @@ func (s *Settings) MappingMode(ctx context.Context) (domain.MappingMode, error) 
 	return domain.MappingMode(value), nil
 }
 
-func (s *Settings) SetMappingMode(ctx context.Context, mode domain.MappingMode) error {
+func (s *Settings) SetMappingMode(ctx context.Context, userID int64, mode domain.MappingMode) error {
 	query := `
-		INSERT INTO settings (key, value) VALUES (?, ?)
-		ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+		INSERT INTO settings (user_id, key, value) VALUES (?, ?, ?)
+		ON CONFLICT (user_id, key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
 	`
-	if _, err := s.db.ExecContext(ctx, query, settingMappingMode, string(mode)); err != nil {
+	if _, err := s.db.ExecContext(ctx, query, userID, settingMappingMode, string(mode)); err != nil {
 		return fmt.Errorf("set mapping mode: %w", err)
 	}
 	return nil

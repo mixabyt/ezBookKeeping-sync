@@ -18,7 +18,7 @@ type SettingsDTO struct {
 // getSettings — GET /api/settings
 func (s *Server) getSettings() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		mode, err := s.mappingService.MappingMode(c.Request.Context())
+		mode, err := s.mappingService.MappingMode(c.Request.Context(), currentUserID(c))
 		if err != nil {
 			s.respondError(c, err)
 			return
@@ -36,7 +36,7 @@ func (s *Server) putSettings() gin.HandlerFunc {
 			return
 		}
 		mode := domain.MappingMode(req.MappingMode)
-		if err := s.mappingService.SetMappingMode(c.Request.Context(), mode); err != nil {
+		if err := s.mappingService.SetMappingMode(c.Request.Context(), currentUserID(c),mode); err != nil {
 			s.respondError(c, err)
 			return
 		}
@@ -56,7 +56,7 @@ type WaitingMerchantDTO struct {
 // waitingMerchants — GET /api/waiting-merchants (картки режиму merchant).
 func (s *Server) waitingMerchants() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		merchants, err := s.mappingService.WaitingMerchants(c.Request.Context())
+		merchants, err := s.mappingService.WaitingMerchants(c.Request.Context(), currentUserID(c))
 		if err != nil {
 			logctx.From(c.Request.Context()).Error("не вдалося отримати продавців, що чекають", "err", err)
 			s.respondError(c, err)
@@ -96,7 +96,7 @@ func merchantRuleToDTO(rule domain.MerchantRule) MerchantRuleDTO {
 // listMerchantRules — GET /api/merchant-rules
 func (s *Server) listMerchantRules() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		rules, err := s.mappingService.MerchantRules(c.Request.Context())
+		rules, err := s.mappingService.MerchantRules(c.Request.Context(), currentUserID(c))
 		if err != nil {
 			logctx.From(c.Request.Context()).Error("не вдалося отримати правила продавців", "err", err)
 			s.respondError(c, err)
@@ -129,7 +129,7 @@ func (s *Server) createMerchantRule() gin.HandlerFunc {
 			return
 		}
 
-		rule, queued, err := s.mappingService.CreateMerchantRule(c.Request.Context(), domain.MerchantRule{
+		rule, queued, err := s.mappingService.CreateMerchantRule(c.Request.Context(), currentUserID(c),domain.MerchantRule{
 			MCC:           req.MCC,
 			Direction:     domain.Direction(req.Direction),
 			Description:   req.Description,
@@ -168,7 +168,7 @@ func (s *Server) updateMerchantRule() gin.HandlerFunc {
 			return
 		}
 
-		rule, err := s.mappingService.UpdateMerchantRule(c.Request.Context(), id, req.EzbCategoryID, req.Enabled)
+		rule, err := s.mappingService.UpdateMerchantRule(c.Request.Context(), currentUserID(c),id, req.EzbCategoryID, req.Enabled)
 		if err != nil {
 			logctx.From(c.Request.Context()).Warn("не вдалося оновити правило продавця", "id", id, "err", err)
 			s.respondError(c, err)
@@ -198,7 +198,7 @@ type ReviewItemDTO struct {
 // reviewQueue — GET /api/review
 func (s *Server) reviewQueue() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		queue, err := s.mappingService.ReviewQueue(c.Request.Context())
+		queue, err := s.mappingService.ReviewQueue(c.Request.Context(), currentUserID(c))
 		if err != nil {
 			logctx.From(c.Request.Context()).Error("не вдалося отримати транзакції на підтвердження", "err", err)
 			s.respondError(c, err)
@@ -242,7 +242,7 @@ func (s *Server) confirmJob() gin.HandlerFunc {
 			return
 		}
 
-		if err := s.mappingService.ConfirmJob(c.Request.Context(), id, req.EzbCategoryID); err != nil {
+		if err := s.mappingService.ConfirmJob(c.Request.Context(), currentUserID(c),id, req.EzbCategoryID); err != nil {
 			logctx.From(c.Request.Context()).Warn("не вдалося підтвердити транзакцію", "job", id, "err", err)
 			s.respondError(c, err)
 			return
@@ -275,7 +275,7 @@ func (s *Server) skipJobs() gin.HandlerFunc {
 			}
 		}
 
-		skipped, requested, err := s.mappingService.SkipJobs(c.Request.Context(), req.IDs)
+		skipped, requested, err := s.mappingService.SkipJobs(c.Request.Context(), currentUserID(c),req.IDs)
 		if err != nil {
 			logctx.From(c.Request.Context()).Warn("не вдалося видалити транзакції", "ids", req.IDs, "err", err)
 			s.respondError(c, err)

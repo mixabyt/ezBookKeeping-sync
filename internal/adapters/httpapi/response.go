@@ -47,6 +47,10 @@ const (
 	codeInternalError   = "internal_error"
 	codeUnauthorized    = "unauthorized"
 	codeTooManyRequests = "too_many_requests"
+	codeUpstreamError   = "upstream_error"
+
+	// codePasswordChange — PWA за цим кодом показує вікно зміни пароля.
+	codePasswordChange = "password_change_required"
 )
 
 func (s *Server) meta(c *gin.Context) *Meta {
@@ -85,9 +89,20 @@ func classifyError(err error) (int, string) {
 	// TODO: доменні помилки з app/domain (errors.Is(err, app.ErrXxx)) → not_found / conflict / ...
 	case errors.Is(err, ErrUnauthorized):
 		return http.StatusUnauthorized, codeUnauthorized
-	case errors.Is(err, ErrTooManyAttempts):
+	case errors.Is(err, ErrPasswordChangeRequired):
+		return http.StatusForbidden, codePasswordChange
+	case errors.Is(err, ErrTooManyAttempts), errors.Is(err, app.ErrMonoRateLimited):
 		return http.StatusTooManyRequests, codeTooManyRequests
+	case errors.Is(err, app.ErrUpstreamUnavailable):
+		return http.StatusBadGateway, codeUpstreamError
 	case errors.Is(err, errBadKeyType), errors.Is(err, errBadLimit), errors.Is(err, errBadKind), errors.Is(err, errBadID),
+		errors.Is(err, app.ErrWrongCurrentPassword),
+		errors.Is(err, app.ErrWeakPassword),
+		errors.Is(err, app.ErrSamePassword),
+		errors.Is(err, app.ErrEmptyToken),
+		errors.Is(err, app.ErrBadEzbToken),
+		errors.Is(err, app.ErrBadMonoToken),
+		errors.Is(err, app.ErrMonoRejected),
 		errors.Is(err, domain.ErrInvalidMCCRange),
 		errors.Is(err, domain.ErrInvalidDirection),
 		errors.Is(err, domain.ErrEmptyCategory),
@@ -97,7 +112,8 @@ func classifyError(err error) (int, string) {
 		errors.Is(err, app.ErrNoJobsSelected),
 		errors.Is(err, app.ErrTooManyJobs):
 		return http.StatusBadRequest, codeValidationError
-	case errors.Is(err, app.ErrRuleExists), errors.Is(err, app.ErrJobNotReviewable):
+	case errors.Is(err, app.ErrRuleExists), errors.Is(err, app.ErrJobNotReviewable),
+		errors.Is(err, app.ErrNoEzbToken), errors.Is(err, app.ErrWebhookNotConfigured):
 		return http.StatusConflict, codeConflict
 	case errors.Is(err, app.ErrRuleNotFound):
 		return http.StatusNotFound, codeNotFound
@@ -116,6 +132,9 @@ func classifyError(err error) (int, string) {
 // errorMessage builds the client-facing message. Unmapped 5xx errors are hidden
 // in release mode: they may carry SQL and other internals.
 func errorMessage(err error, status int) string {
+	if errors.Is(err, app.ErrUpstreamUnavailable) {
+		return app.ErrUpstreamUnavailable.Error()
+	}
 	if status >= http.StatusInternalServerError && gin.Mode() == gin.ReleaseMode {
 		return "internal server error"
 	}

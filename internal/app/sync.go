@@ -18,41 +18,44 @@ var (
 )
 
 type SyncService struct {
-	jobs          JobRepository
-	categories    CategoryRepository
-	accounts      AccountRepository
-	settings      SettingsRepository
-	ezBookKeeping Bookkeeper
-	wakeUp        chan struct{}
+	jobs       JobRepository
+	categories CategoryRepository
+	accounts   AccountRepository
+	settings   SettingsRepository
+	users      UserRepository
+	ledgers    LedgerFactory
+	wakeUp     chan struct{}
 }
 
 func NewSyncService(
 	jobs JobRepository,
-	book Bookkeeper,
+	users UserRepository,
+	ledgers LedgerFactory,
 	categories CategoryRepository,
 	accounts AccountRepository,
 	settings SettingsRepository,
 ) *SyncService {
 	return &SyncService{
-		jobs:          jobs,
-		wakeUp:        make(chan struct{}, 1),
-		ezBookKeeping: book,
-		categories:    categories,
-		accounts:      accounts,
-		settings:      settings,
+		jobs:       jobs,
+		wakeUp:     make(chan struct{}, 1),
+		users:      users,
+		ledgers:    ledgers,
+		categories: categories,
+		accounts:   accounts,
+		settings:   settings,
 	}
 }
 
-func (s *SyncService) Enqueue(ctx context.Context, tx *domain.BankTransaction) error {
+func (s *SyncService) Enqueue(ctx context.Context, userID int64, tx *domain.BankTransaction) error {
 	if tx.MCC == 0 || tx.BankCategory != "" {
-		mcc, err := s.normalizeTxCategory(ctx, tx)
+		mcc, err := s.normalizeTxCategory(ctx, userID, tx)
 		if err != nil {
 			logctx.From(ctx).Error("normalizeTxCategory", "tx", tx.ID, "err", err)
 			return err
 		}
 		tx.MCC = mcc
 	}
-	err := s.jobs.Add(ctx, tx)
+	err := s.jobs.Add(ctx, userID, tx)
 	if err != nil {
 		logctx.From(ctx).Error("Помилка створення job", "tx", tx.ID, "err", err)
 		return err
@@ -77,8 +80,8 @@ func (s *SyncService) WakesUp() <-chan struct{} {
 
 // Process — викликає воркер для pending-, waiting_mapping- і needs_review-джоб.
 //
-// Транзакція йде в ezBookkeeping лише коли відомі і категорія, і рахунок. Обидва
-// перевіряються за один прохід, щоб у причині очікування одразу було все, чого бракує,
+// Транзакція йде в ezBookkeeping лише коли відомі токен власника джоби, категорія і рахунок.
+// Усе перевіряється за один прохід, щоб у причині очікування одразу було все, чого бракує,
 // а не "домапив категорію → тепер виявилось, що й рахунку немає".
 //
 // Категорія: підтверджена людиною (job.CategoryID) — у будь-якому режимі; інакше
@@ -86,28 +89,29 @@ func (s *SyncService) WakesUp() <-chan struct{} {
 // діє і на ті, що вже чекають.
 func (s *SyncService) Process(ctx context.Context, job *domain.Job) error {
 	tx := &job.Tx
-	mode, err := s.settings.MappingMode(ctx)
+	mode, err := s.settings.MappingMode(ctx, job.UserID)
 	if err != nil {
 		// джобу не чіпаємо: на наступному тіку спробуємо ще
 		return fmt.Errorf("read mapping mode: %w", err)
 	}
 
-	accountID, accErr := s.accountIDFor(ctx, tx)
+	ledger, ledgerErr := ledgerForUser(ctx, job.UserID, s.users, s.ledgers)
+	accountID, accErr := s.accountIDFor(ctx, job.UserID, tx)
 	categoryID, catErr := job.CategoryID, error(nil)
 	needsReview := false
 	if categoryID == "" {
 		if mode == domain.ModeManual {
 			needsReview = true
 		} else {
-			categoryID, catErr = s.categoryIDFor(ctx, tx, mode)
+			categoryID, catErr = s.categoryIDFor(ctx, job.UserID, tx, mode)
 		}
 	}
 
 	var missing []string
-	for _, err := range []error{catErr, accErr} {
+	for _, err := range []error{ledgerErr, catErr, accErr} {
 		switch {
 		case err == nil:
-		case errors.Is(err, ErrNoCategoryRule), errors.Is(err, ErrNoAccountMapping):
+		case errors.Is(err, ErrNoEzbToken), errors.Is(err, ErrNoCategoryRule), errors.Is(err, ErrNoAccountMapping):
 			missing = append(missing, err.Error())
 		default:
 			// справжній збій (БД тощо) — це не очікування людини
@@ -122,7 +126,7 @@ func (s *SyncService) Process(ctx context.Context, job *domain.Job) error {
 		// перевіряються на кожному тіку, і без цієї умови лічильник ріс би безкінечно.
 		// Історія ключів MCC потрібна лише режиму mcc: у merchant картки будуються з самих джоб.
 		if firstTime && mode == domain.ModeMCC && errors.Is(catErr, ErrNoCategoryRule) {
-			s.trackUnmapped(ctx, domain.UnmappedKey{
+			s.trackUnmapped(ctx, job.UserID, domain.UnmappedKey{
 				Source:     tx.Source,
 				KeyType:    domain.KeyMCC,
 				Key:        strconv.Itoa(tx.MCC),
@@ -145,7 +149,7 @@ func (s *SyncService) Process(ctx context.Context, job *domain.Job) error {
 		return s.jobs.MarkNeedsReview(ctx, job.ID)
 	}
 
-	err = s.ezBookKeeping.AddTransaction(ctx, tx, categoryID, accountID)
+	err = ledger.AddTransaction(ctx, tx, categoryID, accountID)
 	if err != nil {
 		return errors.Join(
 			s.jobs.MarkFailed(ctx, job.ID, err),
@@ -157,9 +161,9 @@ func (s *SyncService) Process(ctx context.Context, job *domain.Job) error {
 
 // categoryIDFor — категорія за правилами режиму. Дефолту немає навмисно: транзакція
 // в "Іншому" — це помилка, яку потім доводиться виправляти руками в ezBookkeeping.
-func (s *SyncService) categoryIDFor(ctx context.Context, tx *domain.BankTransaction, mode domain.MappingMode) (string, error) {
+func (s *SyncService) categoryIDFor(ctx context.Context, userID int64, tx *domain.BankTransaction, mode domain.MappingMode) (string, error) {
 	if mode == domain.ModeMCC {
-		rule, err := s.categories.EzCategoryRuleByMCC(ctx, tx.MCC, tx.Direction())
+		rule, err := s.categories.EzCategoryRuleByMCC(ctx, userID, tx.MCC, tx.Direction())
 		if err != nil {
 			return "", err
 		}
@@ -171,7 +175,7 @@ func (s *SyncService) categoryIDFor(ctx context.Context, tx *domain.BankTransact
 
 	// merchant: правило продавця, потім правило MCC. Історію тут не беремо:
 	// без підтвердження людиною «як минулого разу» — це вгадування.
-	suggestion, err := suggestCategory(ctx, s.categories, tx, false)
+	suggestion, err := suggestCategory(ctx, userID, s.categories, tx, false)
 	if err != nil {
 		return "", err
 	}
@@ -184,11 +188,11 @@ func (s *SyncService) categoryIDFor(ctx context.Context, tx *domain.BankTransact
 // suggestCategory — категорія для транзакції за пріоритетом: правило продавця →
 // правило MCC → (withHistory) як цей продавець пішов минулого разу.
 // Порожня Suggestion — нічого не знайшлось.
-func suggestCategory(ctx context.Context, categories CategoryRepository, tx *domain.BankTransaction, withHistory bool) (domain.Suggestion, error) {
+func suggestCategory(ctx context.Context, userID int64, categories CategoryRepository, tx *domain.BankTransaction, withHistory bool) (domain.Suggestion, error) {
 	description := merchantDescription(tx)
 
 	if description != "" {
-		rule, err := categories.MerchantRule(ctx, tx.MCC, tx.Direction(), description)
+		rule, err := categories.MerchantRule(ctx, userID, tx.MCC, tx.Direction(), description)
 		if err != nil {
 			return domain.Suggestion{}, err
 		}
@@ -197,7 +201,7 @@ func suggestCategory(ctx context.Context, categories CategoryRepository, tx *dom
 		}
 	}
 
-	rule, err := categories.EzCategoryRuleByMCC(ctx, tx.MCC, tx.Direction())
+	rule, err := categories.EzCategoryRuleByMCC(ctx, userID, tx.MCC, tx.Direction())
 	if err != nil {
 		return domain.Suggestion{}, err
 	}
@@ -206,7 +210,7 @@ func suggestCategory(ctx context.Context, categories CategoryRepository, tx *dom
 	}
 
 	if withHistory && description != "" {
-		last, err := categories.LastCategoryFor(ctx, tx.MCC, tx.Direction(), description)
+		last, err := categories.LastCategoryFor(ctx, userID, tx.MCC, tx.Direction(), description)
 		if err != nil {
 			return domain.Suggestion{}, err
 		}
@@ -224,8 +228,8 @@ func merchantDescription(tx *domain.BankTransaction) string {
 }
 
 // accountIDFor — рахунок ezBookkeeping за мапінгом банківського рахунку.
-func (s *SyncService) accountIDFor(ctx context.Context, tx *domain.BankTransaction) (string, error) {
-	mapping, err := s.accounts.EzAccountByBank(ctx, tx.Source, tx.AccountID)
+func (s *SyncService) accountIDFor(ctx context.Context, userID int64, tx *domain.BankTransaction) (string, error) {
+	mapping, err := s.accounts.EzAccountByBank(ctx, userID, tx.Source, tx.AccountID)
 	if err != nil {
 		return "", err
 	}
@@ -237,8 +241,8 @@ func (s *SyncService) accountIDFor(ctx context.Context, tx *domain.BankTransacti
 
 // trackUnmapped — запис ключа без мапінгу. Це підказка на майбутнє, а не частина
 // обробки транзакції, тому помилка лише логується: через неї втрачати транзакцію безглуздо.
-func (s *SyncService) trackUnmapped(ctx context.Context, key domain.UnmappedKey) {
-	if err := s.categories.TrackUnmapped(ctx, key); err != nil {
+func (s *SyncService) trackUnmapped(ctx context.Context, userID int64, key domain.UnmappedKey) {
+	if err := s.categories.TrackUnmapped(ctx, userID, key); err != nil {
 		logctx.From(ctx).Error("не вдалося записати unmapped key",
 			"key_type", key.KeyType, "key", key.Key, "err", err)
 	}
@@ -246,7 +250,7 @@ func (s *SyncService) trackUnmapped(ctx context.Context, key domain.UnmappedKey)
 
 // помилка може виникнути лише коли проблеми з бд
 // int 0 - категорія не знайдена
-func (s *SyncService) normalizeTxCategory(ctx context.Context, tx *domain.BankTransaction) (int, error) {
+func (s *SyncService) normalizeTxCategory(ctx context.Context, userID int64, tx *domain.BankTransaction) (int, error) {
 	bankCat, err := s.categories.MccByBankCategory(ctx, tx.Source, tx.BankCategory)
 	if err != nil {
 		return 0, err
@@ -255,7 +259,7 @@ func (s *SyncService) normalizeTxCategory(ctx context.Context, tx *domain.BankTr
 		return bankCat.MCC, nil
 	}
 
-	s.trackUnmapped(ctx, domain.UnmappedKey{
+	s.trackUnmapped(ctx, userID, domain.UnmappedKey{
 		Source:     tx.Source,
 		KeyType:    domain.KeyBankCategory,
 		Key:        tx.BankCategory,

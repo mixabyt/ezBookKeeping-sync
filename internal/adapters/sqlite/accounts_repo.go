@@ -20,18 +20,18 @@ func NewAccount(db *sql.DB) *Account {
 
 // EzAccountByBank повертає nil, nil, якщо мапінгу немає — це не помилка,
 // а сигнал для app поставити джобу в очікування.
-func (a *Account) EzAccountByBank(ctx context.Context, source domain.Source, bankAccountID string) (*domain.AccountMapping, error) {
+func (a *Account) EzAccountByBank(ctx context.Context, userID int64, source domain.Source, bankAccountID string) (*domain.AccountMapping, error) {
 	query := `
 		SELECT source, bank_account_id, ezb_account_id, name
 		FROM account_mappings
-		WHERE source = ? AND bank_account_id = ?
+		WHERE user_id = ? AND source = ? AND bank_account_id = ?
 	`
 
 	var (
 		mapping      domain.AccountMapping
 		ezbAccountID int64
 	)
-	err := a.db.QueryRowContext(ctx, query, source, bankAccountID).Scan(
+	err := a.db.QueryRowContext(ctx, query, userID, source, bankAccountID).Scan(
 		&mapping.Source,
 		&mapping.BankAccountID,
 		&ezbAccountID,
@@ -51,16 +51,17 @@ func (a *Account) EzAccountByBank(ctx context.Context, source domain.Source, ban
 
 // AddMapping створює мапінг або перезаписує наявний: повторне збереження з UI
 // має виправляти помилку ("обрав не той рахунок"), а не падати з конфліктом.
-func (a *Account) AddMapping(ctx context.Context, mapping domain.AccountMapping) error {
+func (a *Account) AddMapping(ctx context.Context, userID int64, mapping domain.AccountMapping) error {
 	query := `
-		INSERT INTO account_mappings (source, bank_account_id, ezb_account_id, name)
-		VALUES (?, ?, ?, ?)
-		ON CONFLICT (source, bank_account_id) DO UPDATE SET
+		INSERT INTO account_mappings (user_id, source, bank_account_id, ezb_account_id, name)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT (user_id, source, bank_account_id) DO UPDATE SET
 			ezb_account_id = excluded.ezb_account_id,
 			name           = excluded.name,
 			updated_at     = CURRENT_TIMESTAMP
 	`
 	_, err := a.db.ExecContext(ctx, query,
+		userID,
 		mapping.Source,
 		mapping.BankAccountID,
 		mapping.EzbAccountID,
@@ -72,13 +73,14 @@ func (a *Account) AddMapping(ctx context.Context, mapping domain.AccountMapping)
 	return nil
 }
 
-func (a *Account) ListMappings(ctx context.Context) ([]domain.AccountMapping, error) {
+func (a *Account) ListMappings(ctx context.Context, userID int64) ([]domain.AccountMapping, error) {
 	query := `
 		SELECT source, bank_account_id, ezb_account_id, name
 		FROM account_mappings
+		WHERE user_id = ?
 		ORDER BY source, bank_account_id
 	`
-	rows, err := a.db.QueryContext(ctx, query)
+	rows, err := a.db.QueryContext(ctx, query, userID)
 	if err != nil {
 		return nil, fmt.Errorf("list account mappings: %w", err)
 	}

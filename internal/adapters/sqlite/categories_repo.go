@@ -24,10 +24,11 @@ func NewCategory(db *sql.DB) *Category {
 // EzCategoryRuleByMCC — увімкнене правило для MCC і напрямку з найменшим priority.
 // Напрямок важливий: повернення коштів від магазину — це дохід, і витратна
 // категорія для нього не підходить.
-func (c *Category) EzCategoryRuleByMCC(ctx context.Context, mcc int, direction domain.Direction) (*domain.MCCCategoryRule, error) {
+func (c *Category) EzCategoryRuleByMCC(ctx context.Context, userID int64, mcc int, direction domain.Direction) (*domain.MCCCategoryRule, error) {
 	query := `SELECT ` + ruleColumns + `
 		FROM mcc_category_rules
-		WHERE enabled = 1
+		WHERE user_id = ?
+			AND enabled = 1
 			AND direction = ?
 			AND mcc_from <= ?
 			AND mcc_to >= ?
@@ -35,7 +36,7 @@ func (c *Category) EzCategoryRuleByMCC(ctx context.Context, mcc int, direction d
 		LIMIT 1
 	`
 
-	rule, err := scanRule(c.db.QueryRowContext(ctx, query, direction, mcc, mcc))
+	rule, err := scanRule(c.db.QueryRowContext(ctx, query, userID, direction, mcc, mcc))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -79,10 +80,10 @@ func scanRule(row interface{ Scan(dest ...any) error }) (*domain.MCCCategoryRule
 }
 
 // ListRules — усі правила, включно з вимкненими, для сторінки мапінгів.
-func (c *Category) ListRules(ctx context.Context) ([]domain.MCCCategoryRule, error) {
-	query := `SELECT ` + ruleColumns + ` FROM mcc_category_rules ORDER BY mcc_from, mcc_to, direction`
+func (c *Category) ListRules(ctx context.Context, userID int64) ([]domain.MCCCategoryRule, error) {
+	query := `SELECT ` + ruleColumns + ` FROM mcc_category_rules WHERE user_id = ? ORDER BY mcc_from, mcc_to, direction`
 
-	rows, err := c.db.QueryContext(ctx, query)
+	rows, err := c.db.QueryContext(ctx, query, userID)
 	if err != nil {
 		return nil, fmt.Errorf("list mcc rules: %w", err)
 	}
@@ -103,11 +104,11 @@ func (c *Category) ListRules(ctx context.Context) ([]domain.MCCCategoryRule, err
 }
 
 // UpdateRule змінює категорію, enabled і нотатку правила.
-func (c *Category) UpdateRule(ctx context.Context, id int64, categoryID string, enabled bool, note string) (*domain.MCCCategoryRule, error) {
+func (c *Category) UpdateRule(ctx context.Context, userID int64, id int64, categoryID string, enabled bool, note string) (*domain.MCCCategoryRule, error) {
 	query := `
 		UPDATE mcc_category_rules
 		SET ezb_category_id = ?, enabled = ?, note = ?, updated_at = CURRENT_TIMESTAMP
-		WHERE id = ?
+		WHERE id = ? AND user_id = ?
 		RETURNING ` + ruleColumns
 
 	enabledInt := 0
@@ -115,7 +116,7 @@ func (c *Category) UpdateRule(ctx context.Context, id int64, categoryID string, 
 		enabledInt = 1
 	}
 
-	rule, err := scanRule(c.db.QueryRowContext(ctx, query, categoryID, enabledInt, note, id))
+	rule, err := scanRule(c.db.QueryRowContext(ctx, query, categoryID, enabledInt, note, id, userID))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("%w: id %d", app.ErrRuleNotFound, id)
@@ -158,11 +159,11 @@ func (c *Category) MccByBankCategory(ctx context.Context, source domain.Source, 
 // TrackUnmapped записує ключ, для якого немає мапінгу, або збільшує лічильник,
 // якщо такий ключ уже бачили. sample_desc зберігаємо лише перший — як зразок,
 // за яким потім зрозуміло, що це взагалі було.
-func (c *Category) TrackUnmapped(ctx context.Context, key domain.UnmappedKey) error {
+func (c *Category) TrackUnmapped(ctx context.Context, userID int64, key domain.UnmappedKey) error {
 	query := `
-		INSERT INTO unmapped_keys (source, key_type, "key", direction, sample_desc, hits, first_seen, last_seen)
-		VALUES (?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-		ON CONFLICT (source, key_type, "key", direction) DO UPDATE SET
+		INSERT INTO unmapped_keys (user_id, source, key_type, "key", direction, sample_desc, hits, first_seen, last_seen)
+		VALUES (?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		ON CONFLICT (user_id, source, key_type, "key", direction) DO UPDATE SET
 			hits      = hits + 1,
 			last_seen = CURRENT_TIMESTAMP,
 			sample_desc = CASE
@@ -172,6 +173,7 @@ func (c *Category) TrackUnmapped(ctx context.Context, key domain.UnmappedKey) er
 	`
 
 	_, err := c.db.ExecContext(ctx, query,
+		userID,
 		key.Source,
 		key.KeyType,
 		key.Key,
@@ -189,7 +191,7 @@ func (c *Category) TrackUnmapped(ctx context.Context, key domain.UnmappedKey) er
 // resolved рахується на льоту: рядки в unmapped_keys не видаляються, тому без
 // цієї ознаки список показував би вже замаплені ключі як борг. Для bank_category
 // правил не існує, тому там resolved завжди 0.
-func (c *Category) ListUnmapped(ctx context.Context, filter domain.UnmappedFilter) ([]domain.UnmappedKey, error) {
+func (c *Category) ListUnmapped(ctx context.Context, userID int64, filter domain.UnmappedFilter) ([]domain.UnmappedKey, error) {
 	// resolved рахується у підзапиті, бо фільтрувати за ним у WHERE того ж
 	// рівня не можна (а HAVING без GROUP BY SQLite не приймає)
 	query := `
@@ -206,13 +208,14 @@ func (c *Category) ListUnmapped(ctx context.Context, filter domain.UnmappedFilte
 				u.last_seen,
 				EXISTS (
 					SELECT 1 FROM mcc_category_rules r
-					WHERE r.enabled = 1
+					WHERE r.user_id = u.user_id
+						AND r.enabled = 1
 						AND u.key_type = 'mcc'
 						AND r.direction = u.direction
 						AND CAST(u."key" AS INTEGER) BETWEEN r.mcc_from AND r.mcc_to
 				) AS resolved
 			FROM unmapped_keys u
-			WHERE (? = '' OR u.key_type = ?)
+			WHERE u.user_id = ? AND (? = '' OR u.key_type = ?)
 		)
 		WHERE (? = 0 OR resolved = 0)
 		ORDER BY resolved ASC, hits DESC, last_seen DESC
@@ -225,6 +228,7 @@ func (c *Category) ListUnmapped(ctx context.Context, filter domain.UnmappedFilte
 	}
 
 	rows, err := c.db.QueryContext(ctx, query,
+		userID,
 		string(filter.KeyType), string(filter.KeyType),
 		onlyPending,
 		filter.Limit,
@@ -259,12 +263,12 @@ func (c *Category) ListUnmapped(ctx context.Context, filter domain.UnmappedFilte
 }
 
 // AddRule додає правило MCC → категорія.
-// Порушення UNIQUE (mcc_from, mcc_to, direction) перетворюємо на app.ErrRuleExists,
+// Порушення UNIQUE (user_id, mcc_from, mcc_to, direction) перетворюємо на app.ErrRuleExists,
 // щоб API віддав 409, а не 500: для користувача це не збій, а "таке правило вже є".
-func (c *Category) AddRule(ctx context.Context, rule domain.MCCCategoryRule) (*domain.MCCCategoryRule, error) {
+func (c *Category) AddRule(ctx context.Context, userID int64, rule domain.MCCCategoryRule) (*domain.MCCCategoryRule, error) {
 	query := `
-		INSERT INTO mcc_category_rules (mcc_from, mcc_to, direction, priority, ezb_category_id, enabled, note)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO mcc_category_rules (user_id, mcc_from, mcc_to, direction, priority, ezb_category_id, enabled, note)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		RETURNING id
 	`
 
@@ -274,6 +278,7 @@ func (c *Category) AddRule(ctx context.Context, rule domain.MCCCategoryRule) (*d
 	}
 
 	err := c.db.QueryRowContext(ctx, query,
+		userID,
 		rule.MCCFrom,
 		rule.MCCTo,
 		rule.Direction,
@@ -311,12 +316,12 @@ func scanMerchantRule(row interface{ Scan(dest ...any) error }) (*domain.Merchan
 }
 
 // MerchantRule — увімкнене правило продавця; nil, nil — немає.
-func (c *Category) MerchantRule(ctx context.Context, mcc int, direction domain.Direction, description string) (*domain.MerchantRule, error) {
+func (c *Category) MerchantRule(ctx context.Context, userID int64, mcc int, direction domain.Direction, description string) (*domain.MerchantRule, error) {
 	query := `SELECT ` + merchantColumns + `
 		FROM merchant_category_rules
-		WHERE enabled = 1 AND mcc = ? AND direction = ? AND description = ?`
+		WHERE user_id = ? AND enabled = 1 AND mcc = ? AND direction = ? AND description = ?`
 
-	rule, err := scanMerchantRule(c.db.QueryRowContext(ctx, query, mcc, direction, description))
+	rule, err := scanMerchantRule(c.db.QueryRowContext(ctx, query, userID, mcc, direction, description))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -326,11 +331,11 @@ func (c *Category) MerchantRule(ctx context.Context, mcc int, direction domain.D
 	return rule, nil
 }
 
-// AddMerchantRule — UNIQUE (mcc, direction, description) → app.ErrRuleExists (409).
-func (c *Category) AddMerchantRule(ctx context.Context, rule domain.MerchantRule) (*domain.MerchantRule, error) {
+// AddMerchantRule — UNIQUE (user_id, mcc, direction, description) → app.ErrRuleExists (409).
+func (c *Category) AddMerchantRule(ctx context.Context, userID int64, rule domain.MerchantRule) (*domain.MerchantRule, error) {
 	query := `
-		INSERT INTO merchant_category_rules (mcc, direction, description, ezb_category_id, enabled)
-		VALUES (?, ?, ?, ?, ?)
+		INSERT INTO merchant_category_rules (user_id, mcc, direction, description, ezb_category_id, enabled)
+		VALUES (?, ?, ?, ?, ?, ?)
 		RETURNING id
 	`
 	enabled := 0
@@ -339,7 +344,7 @@ func (c *Category) AddMerchantRule(ctx context.Context, rule domain.MerchantRule
 	}
 
 	err := c.db.QueryRowContext(ctx, query,
-		rule.MCC, rule.Direction, rule.Description, rule.EzbCategoryID, enabled,
+		userID, rule.MCC, rule.Direction, rule.Description, rule.EzbCategoryID, enabled,
 	).Scan(&rule.ID)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
@@ -350,10 +355,10 @@ func (c *Category) AddMerchantRule(ctx context.Context, rule domain.MerchantRule
 	return &rule, nil
 }
 
-func (c *Category) ListMerchantRules(ctx context.Context) ([]domain.MerchantRule, error) {
-	query := `SELECT ` + merchantColumns + ` FROM merchant_category_rules ORDER BY description, mcc, direction`
+func (c *Category) ListMerchantRules(ctx context.Context, userID int64) ([]domain.MerchantRule, error) {
+	query := `SELECT ` + merchantColumns + ` FROM merchant_category_rules WHERE user_id = ? ORDER BY description, mcc, direction`
 
-	rows, err := c.db.QueryContext(ctx, query)
+	rows, err := c.db.QueryContext(ctx, query, userID)
 	if err != nil {
 		return nil, fmt.Errorf("list merchant rules: %w", err)
 	}
@@ -373,11 +378,11 @@ func (c *Category) ListMerchantRules(ctx context.Context) ([]domain.MerchantRule
 	return rules, nil
 }
 
-func (c *Category) UpdateMerchantRule(ctx context.Context, id int64, categoryID string, enabled bool) (*domain.MerchantRule, error) {
+func (c *Category) UpdateMerchantRule(ctx context.Context, userID int64, id int64, categoryID string, enabled bool) (*domain.MerchantRule, error) {
 	query := `
 		UPDATE merchant_category_rules
 		SET ezb_category_id = ?, enabled = ?, updated_at = CURRENT_TIMESTAMP
-		WHERE id = ?
+		WHERE id = ? AND user_id = ?
 		RETURNING ` + merchantColumns
 
 	enabledInt := 0
@@ -385,7 +390,7 @@ func (c *Category) UpdateMerchantRule(ctx context.Context, id int64, categoryID 
 		enabledInt = 1
 	}
 
-	rule, err := scanMerchantRule(c.db.QueryRowContext(ctx, query, categoryID, enabledInt, id))
+	rule, err := scanMerchantRule(c.db.QueryRowContext(ctx, query, categoryID, enabledInt, id, userID))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("%w: id %d", app.ErrRuleNotFound, id)
@@ -397,17 +402,17 @@ func (c *Category) UpdateMerchantRule(ctx context.Context, id int64, categoryID 
 
 // LastCategoryFor — з якою категорією цей продавець останнього разу пішов
 // в ezBookkeeping. Джоби до міграції 000007 категорії не мають — їх пропускаємо.
-func (c *Category) LastCategoryFor(ctx context.Context, mcc int, direction domain.Direction, description string) (string, error) {
+func (c *Category) LastCategoryFor(ctx context.Context, userID int64, mcc int, direction domain.Direction, description string) (string, error) {
 	query := `
 		SELECT ezb_category_id FROM jobs
-		WHERE status = ? AND ezb_category_id <> ''
+		WHERE user_id = ? AND status = ? AND ezb_category_id <> ''
 			AND mcc = ? AND (amount < 0) = ? AND trim(description) = ?
 		ORDER BY id DESC
 		LIMIT 1
 	`
 	var categoryID string
 	err := c.db.QueryRowContext(ctx, query,
-		domain.JobDone, mcc, direction == domain.DirectionExpense, description,
+		userID, domain.JobDone, mcc, direction == domain.DirectionExpense, description,
 	).Scan(&categoryID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

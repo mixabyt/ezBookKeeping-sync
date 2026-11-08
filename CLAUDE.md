@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`ezbk-tools` (Go module `ezbkTools`) receives Monobank webhooks and stores each transaction as a job in SQLite. A background worker maps each job to an ezBookkeeping category and account, then writes it to a self-hosted ezBookkeeping instance. The same binary serves a small PWA (Vue, embedded from `web/public`) for mapping categories and accounts and for reviewing transactions. Privat and other banks are planned as additional adapters.
+`ezbk-tools` (Go module `ezbkTools`) receives Monobank webhooks and stores each transaction as a job in SQLite. A background worker maps each job to an ezBookkeeping category and account, then writes it to a self-hosted ezBookkeeping instance. The same binary serves a small PWA (Vue, embedded from `web/public`) for mapping categories and accounts and for reviewing transactions. It supports several users: each has their own password, ezBookkeeping token, webhook URL, rules and transactions. Privat and other banks are planned as additional adapters.
 
 This is also a learning project. The user writes most of the code themselves: explain approaches in words and give code only when they explicitly ask for it. The user communicates in Ukrainian, and code comments and log messages are in Ukrainian. `ARCHITECTURE.md` (Ukrainian) explains the layering rationale. It predates the mapping, modes and PWA work.
 
@@ -13,10 +13,11 @@ This is also a learning project. The user writes most of the code themselves: ex
 ```sh
 go build ./...
 go vet ./...
-go test ./...                     # no tests exist yet; CI still runs it
+go test ./...
 go test ./internal/app -run TestName
 go run ./cmd/ezbk-tools           # run from repo root: .env is loaded from the working dir
 go run ./cmd/hashpw               # bcrypt hash for AUTH_PASSWORD_HASH
+go run ./cmd/ezbk-tools adduser <login>   # new user; prints a one-time temporary password
 
 # migrations (golang-migrate CLI)
 migrate create -ext sql -dir database/migrations -seq <name>
@@ -34,6 +35,8 @@ Settings come from `.env` (template: `.env.example`).
 - `DB_DATABASE` is a SQLite file path relative to the working dir.
 - `LOG_LEVEL=debug` selects the human-readable tint logger; anything else uses zap through `zapslog`.
 - `MONO_SPOOL_URL` is optional (see Spool below).
+- `MONO_WEBHOOK_BASE_URL` is the public webhook URL without the token; registering a webhook from the PWA needs it.
+- `AUTH_LOGIN`, `AUTH_PASSWORD_HASH` and `EZ_BOOK_KEEPING_KEY` are read only to fill the owner row (`users.id = 1`) while its hash is empty. After that the DB is the source of truth. `AUTH_SECRET` and `EZ_BOOK_KEEPING_BASE_URL` are always needed.
 
 `sqlite.Open` refuses to start when the schema is older than `requiredSchemaVersion` (`internal/adapters/sqlite/open.go`). **Bump that constant with every new migration.** It also enables WAL and `busy_timeout`, because the worker writes while the PWA reads. Never edit an applied migration. SQLite can't alter CHECK constraints, so status changes rebuild `jobs` (see 000006/000007).
 
@@ -46,11 +49,13 @@ The project uses Hexagonal / Ports & Adapters. Dependencies point inward: `adapt
   - `ports.go` declares every interface the app consumes (the consumer owns the interface).
   - `SyncService` is the hot path: `Enqueue` and `Process`.
   - `MappingService` covers human work done through the UI: rules, account mappings, mode, confirming jobs. After each change it wakes the worker through `JobWaker`.
+  - `UserService` covers accounts: login, password change, ezBookkeeping token, webhook registration. `BootstrapOwner` and `CreateUser` are package functions used outside HTTP.
+  - `userID` is an explicit parameter on repository and service methods (never in `context`), so the compiler finds a forgotten one.
   - `Worker` loops.
   - Sentinel errors (`ErrRuleExists`, `ErrJobNotReviewable`, ...) are mapped to HTTP codes in `httpapi/response.go` `classifyError`.
 - `internal/adapters/httpapi`: gin server.
   - The Monobank webhook.
-  - `/api/*` for the PWA. Single-user auth comes from env: bcrypt password plus an HMAC-signed session cookie, with per-IP login throttling.
+  - `/api/*` for the PWA. Users live in the `users` table: bcrypt password plus an HMAC-signed session cookie carrying `userID|session_version|exp`, with per-IP login throttling. A password change bumps `session_version`, which ends older sessions. While `must_change_password` is set, everything except `/api/me`, `/api/change-password` and `/api/logout` answers 403 `password_change_required`.
   - `NoRoute` serves the embedded PWA.
   - Uses a unified JSON envelope.
 - `internal/adapters/monobank`: webhook signature check.
@@ -58,10 +63,13 @@ The project uses Hexagonal / Ports & Adapters. Dependencies point inward: `adapt
   - The public key comes from `/bank/sync` and is cached by key id.
   - `CheckSign(*http.Request)` wraps `Verify(ctx, header, raw)`.
   - Always verify before parsing JSON.
-  - **Note:** the `checkMonoSign` middleware on live `POST /mono-webhook` is currently commented out.
+  - The bank signs every client's webhooks with one key, so the signature does not say whose transaction it is. The user comes from the random `users.webhook_token` in `/mono-webhook/:token`, looked up per request, so a new user needs no restart.
+  - `/mono-webhook` without a token is a temporary alias for the owner, kept for the webhook registered before multi-user support and for old spool files.
+  - `WebhookRegistrar` calls `POST /personal/webhook`. The user's Monobank key is used once and never stored or logged.
 - `internal/adapters/ezbookkeeping`: API client, also used as the category and account catalog for the PWA.
   - `response.go`'s `do()` is the single request path. A call succeeds only on **2xx with `success: true`**; anything else becomes `*APIError`.
   - Every request needs `X-Timezone-Name` / `X-Timezone-Offset` (Europe/Kyiv, embedded through `time/tzdata`), otherwise you get error 200008.
+  - `Factory.Client(token)` builds a client per user; the base URL and `http.Client` are shared.
   - DTOs live in `dto/`.
 - `internal/adapters/sqlite`: repositories.
 - `internal/adapters/spool`: drains the VPS webhook queue (see below).
@@ -69,12 +77,13 @@ The project uses Hexagonal / Ports & Adapters. Dependencies point inward: `adapt
 
 ### Transaction flow
 
-1. **Intake:** the webhook handler builds a `domain.BankTransaction` (`Source` plus `tx_id` with a `mb_` prefix) and calls `Enqueue`.
+1. **Intake:** the webhook handler finds the user by the URL token, builds a `domain.BankTransaction` (`Source` plus `tx_id` with a `mb_` prefix) and calls `Enqueue`.
    - For banks without MCC, `Enqueue` normalizes bank category → MCC via `bank_category_mcc`. A miss is recorded in `unmapped_keys`.
-   - `jobs.Add` inserts with `ON CONFLICT (source, tx_id) DO NOTHING`, so repeated webhooks are no-ops.
+   - `jobs.Add` inserts with `ON CONFLICT (user_id, source, tx_id) DO NOTHING`, so repeated webhooks are no-ops.
    - The handler then wakes the worker and always answers 200, so Monobank never retries or disables the webhook.
-2. **Worker:** each loop drains `pending` jobs in batches, then re-checks `waiting_mapping` and `needs_review` jobs. It walks those with an id cursor, because their set doesn't shrink when nothing was mapped. It then sleeps until a wake signal, a 15-min tick or ctx cancel.
+2. **Worker:** one worker serves all users (each job carries `UserID`). Each loop drains `pending` jobs in batches, then re-checks `waiting_mapping` and `needs_review` jobs. It walks those with an id cursor, because their set doesn't shrink when nothing was mapped. It then sleeps until a wake signal, a 15-min tick or ctx cancel.
 3. **`Process`:** reads the mapping mode from `settings` for every job, so a switch in the UI also applies to jobs already waiting.
+   - **ezBookkeeping token:** the job owner's. While it is empty, the job waits in `waiting_mapping`.
    - **Account:** comes from `account_mappings`. There is **no default**.
    - **Category:** a human-confirmed `job.CategoryID` always wins. Otherwise it depends on the mode, and there is **no default** category either:
      - `mcc`: an MCC range rule;
@@ -86,7 +95,7 @@ The project uses Hexagonal / Ports & Adapters. Dependencies point inward: `adapt
 Job statuses: `pending → done | failed | waiting_mapping | needs_review`.
 - `needs_review` goes back to `pending` on confirm, and the UPDATE is guarded by status so a double tap can't send twice.
 - `needs_review` can also become `skipped` when a person "deletes" a transaction in the PWA (`POST /api/jobs/skip`, single or bulk).
-  - **Deletion is a status, never a `DELETE`.** The row must stay so that `UNIQUE (source, tx_id)` ignores a repeated webhook or a spool replay of the same transaction.
+  - **Deletion is a status, never a `DELETE`.** The row must stay so that `UNIQUE (user_id, source, tx_id)` ignores a repeated webhook or a spool replay of the same transaction.
   - `MarkWaiting` / `MarkNeedsReview` skip `skipped` rows, so the worker can't revive a job deleted mid-pass.
 
 ### Spool (webhooks received while the home server was down)
@@ -97,12 +106,13 @@ When the server is unreachable, nginx on the VPS answers Monobank with 200 and s
 
 How the service drains it:
 - `main` drains the queue once **before** starting HTTP, then `spool.Poller` re-checks every 5 min.
-- `monoSpoolHandler` in `main` routes each file to `httpapi.ReplayMonoWebhook`. That function runs `monobank.Verify` on `body` as-is, then reuses the same DTO → domain mapping as the live handler.
-- A file is deleted on success or `spool.ErrDiscard`: forged or missing signature, broken JSON, wrong route.
+- `monoSpoolHandler` in `main` takes the webhook token from the file's `uri` (`httpapi.ParseMonoWebhookURI`) and routes the file to `httpapi.ReplayMonoWebhook`. That function runs `monobank.Verify` on `body` as-is, then reuses the same DTO → domain mapping as the live handler.
+- A file is deleted on success or `spool.ErrDiscard`: forged or missing signature, broken JSON, wrong route, unknown webhook token.
 - A file is kept for retry on any other error: key fetch failure, unknown key id after rotation, DB error.
 
 ### Invariants
 
+- Every query reached from the UI filters by `user_id`, including `UPDATE`s by id, so substituting another user's id changes nothing. `bank_category_mcc` is the one shared table.
 - `Source` is a separate field and column, and it is the source of truth for the bank. Never parse the bank out of the ID prefix.
 - `Amount` is an int64 in kopecks; negative means expense (`BankTransaction.Direction()`). Direction is not stored in `jobs`; SQL derives it from `amount < 0`.
 - Merchant descriptions are compared exactly after trim, because SQLite's `lower()` is ASCII-only.

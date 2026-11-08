@@ -89,6 +89,7 @@
   .msg { padding: 10px 12px; border-radius: 10px; margin-bottom: 12px; font-size: 14px; }
   .msg.err { background: #2b1a1c; color: #ffb4b4; }
   .msg.ok { background: #16271d; color: #9ae6b8; }
+  .msg.warn { background: #2b2415; color: #f0cf8a; }
   .empty { text-align: center; color: var(--muted); padding: 40px 0; }
   .muted { color: var(--muted); font-size: 13px; }
   .missing { color: var(--warn); }
@@ -151,6 +152,27 @@
     </div>
   </main>
 
+  <!-- тимчасовий пароль: закрити не можна, сервер теж не пустить далі, поки його не змінять -->
+  <main v-else-if="authed && account.must_change_password" class="login">
+    <div class="card" style="margin-top:12vh">
+      <h1 style="margin:0 0 6px;font-size:18px">Задайте свій пароль</h1>
+      <div class="muted" style="margin-bottom:14px">Ви увійшли з тимчасовим паролем. Щоб продовжити, замініть його на свій.</div>
+      <div v-if="error" class="msg err">{{ error }}</div>
+      <label>Тимчасовий пароль</label>
+      <input v-model="passwordForm.current" type="password" autocomplete="current-password">
+      <div style="height:10px"></div>
+      <label>Новий пароль</label>
+      <input v-model="passwordForm.next" type="password" autocomplete="new-password">
+      <div style="height:10px"></div>
+      <label>Новий пароль ще раз</label>
+      <input v-model="passwordForm.repeat" type="password" autocomplete="new-password" @keyup.enter="changePassword">
+      <div style="height:14px"></div>
+      <button :disabled="saving === 'password'" @click="changePassword">{{ saving === 'password' ? '…' : 'Змінити пароль' }}</button>
+      <div style="height:8px"></div>
+      <button class="ghost" style="width:100%" @click="doLogout">Вийти</button>
+    </div>
+  </main>
+
   <!-- робочий екран -->
   <template v-else-if="authed">
     <header>
@@ -169,6 +191,10 @@
 
       <!-- ============ Чекають ============ -->
       <template v-if="view === 'pending'">
+        <div v-if="setupMissing.length" class="msg warn">
+          Лишилось налаштувати: {{ setupMissing.join(', ') }}.
+          <a href="#/settings" @click.prevent="go('settings')">До налаштувань</a>
+        </div>
         <div class="spread" style="margin-bottom:4px">
           <span class="muted">
             Режим: <a href="#/settings" @click.prevent="go('settings')">{{ modeTitle(mode) }}</a>
@@ -395,7 +421,38 @@
 
       <!-- ============ Налаштування ============ -->
       <template v-else>
-        <h2 style="margin-top:4px">Як визначати категорію</h2>
+        <h2 style="margin-top:4px">ezBookkeeping</h2>
+        <div class="card">
+          <div class="spread" style="margin-bottom:10px">
+            <span>API-токен вашого акаунта</span>
+            <span class="badge" :class="account.ezb_configured ? 'done' : 'wait'">{{ account.ezb_configured ? 'задано' : 'не задано' }}</span>
+          </div>
+          <div class="row">
+            <input v-model="ezbToken" type="password" autocomplete="off" :placeholder="account.ezb_configured ? 'Новий токен' : 'Вставте токен'">
+            <button :disabled="!ezbToken.trim() || saving === 'ezb'" @click="saveEzbToken">{{ saving === 'ezb' ? '…' : 'Зберегти' }}</button>
+          </div>
+          <div class="muted" style="margin-top:8px">Без токена транзакції чекатимуть: вони не загубляться.</div>
+        </div>
+
+        <h2>Вебхук Monobank</h2>
+        <div class="card">
+          <div class="spread" style="margin-bottom:10px">
+            <span>Особистий ключ Monobank</span>
+            <span class="badge" :class="account.mono_webhook_registered_at ? 'done' : 'wait'">
+              {{ account.mono_webhook_registered_at ? 'зареєстровано ' + txDate(account.mono_webhook_registered_at) : 'не зареєстровано' }}
+            </span>
+          </div>
+          <div class="row">
+            <input v-model="monoToken" type="password" autocomplete="off" placeholder="Вставте ключ">
+            <button :disabled="!monoToken.trim() || saving === 'mono'" @click="registerWebhook">{{ saving === 'mono' ? '…' : 'Зареєструвати' }}</button>
+          </div>
+          <div class="muted" style="margin-top:8px">
+            Ключ видає <a href="https://api.monobank.ua/" target="_blank" rel="noopener">api.monobank.ua</a>.
+            Він потрібен лише для реєстрації і на сервері не зберігається.
+          </div>
+        </div>
+
+        <h2>Як визначати категорію</h2>
         <div class="card">
           <label v-for="opt in modeOptions" :key="opt.value" class="option">
             <input type="radio" name="mode" :value="opt.value" v-model="modeDraft">
@@ -408,6 +465,21 @@
         </div>
         <div class="muted">
           Режим діє і на транзакції, що вже чекають. Мапінг рахунку потрібен у всіх режимах.
+        </div>
+
+        <h2>Пароль</h2>
+        <div class="card">
+          <div class="muted" style="margin-bottom:10px">Логін: {{ account.login }}. Після зміни пароля інші пристрої доведеться перезайти.</div>
+          <label>Поточний пароль</label>
+          <input v-model="passwordForm.current" type="password" autocomplete="current-password">
+          <div style="height:10px"></div>
+          <label>Новий пароль</label>
+          <input v-model="passwordForm.next" type="password" autocomplete="new-password">
+          <div style="height:10px"></div>
+          <label>Новий пароль ще раз</label>
+          <input v-model="passwordForm.repeat" type="password" autocomplete="new-password">
+          <div style="height:12px"></div>
+          <button :disabled="saving === 'password'" @click="changePassword">{{ saving === 'password' ? '…' : 'Змінити пароль' }}</button>
         </div>
       </template>
     </main>
@@ -541,6 +613,17 @@ const app = createApp({
     const onlyPending = ref(true);
     const loginForm = reactive({ login: '', password: '' });
 
+    // обліковий запис: відповідь /api/me (секретів там немає, лише ознаки, чи вони задані)
+    const emptyAccount = { login: '', must_change_password: false, ezb_configured: false, mono_webhook_registered_at: '' };
+    const account = ref({ ...emptyAccount });
+    const passwordForm = reactive({ current: '', next: '', repeat: '' });
+    const ezbToken = ref('');
+    const monoToken = ref('');
+    const setupMissing = computed(() => [
+      !account.value.ezb_configured && 'токен ezBookkeeping',
+      !account.value.mono_webhook_registered_at && 'вебхук Monobank',
+    ].filter(Boolean));
+
     // довідники ezBookkeeping: спільні для обох вкладок, вантажимо раз за сесію
     const allCategories = ref([]); // разом із прихованими — для підписів уже збережених правил
     const ezAccounts = ref([]);
@@ -598,6 +681,16 @@ const app = createApp({
       selectMode.value = false;
       dialog.value = null;
       notice.value = '';
+      account.value = { ...emptyAccount };
+      clearPasswordForm();
+      ezbToken.value = '';
+      monoToken.value = '';
+    }
+
+    function clearPasswordForm() {
+      passwordForm.current = '';
+      passwordForm.next = '';
+      passwordForm.repeat = '';
     }
 
     // Шляхи навмисно без початкового "/": застосунок може жити під префіксом
@@ -617,6 +710,10 @@ const app = createApp({
         authed.value = false;
         resetData();
         throw new Error(wasAuthed ? 'Сесія завершилась, увійдіть ще раз' : '');
+      }
+      // пароль мали змінити раніше (наприклад, скинули в іншій вкладці) — показуємо вікно зміни
+      if (res.status === 403 && body?.error?.code === 'password_change_required') {
+        account.value = { ...account.value, must_change_password: true };
       }
       if (!res.ok) throw new Error(body?.error?.message || `Помилка ${res.status}`);
       return body?.data;
@@ -708,6 +805,8 @@ const app = createApp({
     };
 
     async function loadCatalogs() {
+      // без токена ezBookkeeping довідників немає звідки взяти; про це вже каже підказка вгорі
+      if (!account.value.ezb_configured) return;
       const [cats, accs] = await Promise.all([
         allCategories.value.length ? null : api('api/categories?include_hidden=true'),
         ezAccounts.value.length ? null : api('api/accounts'),
@@ -789,7 +888,7 @@ const app = createApp({
     let refreshError = false; // помилку саме оновлення прибираємо при наступному успіху, чужу — ні
     async function refresh() {
       // і не під відкритим діалогом: текст «Видалити N транзакцій» має відповідати списку під ним
-      if (!authed.value || view.value !== 'pending' || saving.value || loading.value || refreshing.value || dialog.value) return;
+      if (!authed.value || account.value.must_change_password || view.value !== 'pending' || saving.value || loading.value || refreshing.value || dialog.value) return;
       refreshing.value = true;
       try {
         await loadPending();
@@ -829,8 +928,13 @@ const app = createApp({
       const next = viewFromHash();
       if (next === view.value) return;
       view.value = next;
-      if (authed.value) load();
+      if (authed.value && !account.value.must_change_password) load();
     });
+
+    // поки пароль тимчасовий, сервер усе одно нічого не віддасть
+    async function enterApp() {
+      if (!account.value.must_change_password) await load();
+    }
 
     async function doLogin() {
       // інакше сервер відповість сирим текстом валідатора англійською
@@ -841,10 +945,12 @@ const app = createApp({
       busy.value = true;
       error.value = '';
       try {
-        await api('api/login', { method: 'POST', body: JSON.stringify(loginForm) });
+        account.value = await api('api/login', { method: 'POST', body: JSON.stringify(loginForm) });
+        // тимчасовий пароль людина щойно ввела, вдруге просити його немає сенсу
+        if (account.value.must_change_password) passwordForm.current = loginForm.password;
         loginForm.password = '';
         authed.value = true;
-        await load();
+        await enterApp();
       } catch (e) {
         error.value = e.message;
       } finally {
@@ -1025,6 +1131,41 @@ const app = createApp({
       return `Режим: ${modeTitle(modeDraft.value)}. Транзакції, що чекають, перевіряються за ним`;
     });
 
+    function changePassword() {
+      if (passwordForm.next.length < 8) { error.value = 'Новий пароль має містити щонайменше 8 символів'; notice.value = ''; return; }
+      if (passwordForm.next !== passwordForm.repeat) { error.value = 'Нові паролі не збігаються'; notice.value = ''; return; }
+      return save('password', async () => {
+        const wasTemporary = account.value.must_change_password;
+        account.value = await api('api/change-password', {
+          method: 'POST',
+          body: JSON.stringify({ current_password: passwordForm.current, new_password: passwordForm.next }),
+        });
+        clearPasswordForm();
+        if (!wasTemporary) return 'Пароль змінено';
+        // далі людині треба налаштувати токен і вебхук; view ставимо одразу, щоб save завантажив саме цей екран
+        go('settings');
+        view.value = 'settings';
+        return 'Пароль змінено. Тепер задайте токен ezBookkeeping і зареєструйте вебхук Monobank';
+      });
+    }
+
+    const saveEzbToken = () => save('ezb', async () => {
+      await api('api/ezb-token', { method: 'PUT', body: JSON.stringify({ token: ezbToken.value }) });
+      ezbToken.value = '';
+      account.value = { ...account.value, ezb_configured: true };
+      // довідники належать акаунту, який щойно змінився
+      allCategories.value = [];
+      ezAccounts.value = [];
+      return 'Токен ezBookkeeping збережено';
+    });
+
+    const registerWebhook = () => save('mono', async () => {
+      const res = await api('api/mono/webhook', { method: 'POST', body: JSON.stringify({ token: monoToken.value }) });
+      monoToken.value = '';
+      account.value = { ...account.value, mono_webhook_registered_at: res.mono_webhook_registered_at };
+      return 'Вебхук Monobank зареєстровано';
+    });
+
     function toggleAll() {
       onlyPending.value = !onlyPending.value;
       load();
@@ -1034,9 +1175,9 @@ const app = createApp({
     onMounted(async () => {
       view.value = viewFromHash();
       try {
-        await api('api/me');
+        account.value = await api('api/me');
         authed.value = true;
-        await load();
+        await enterApp();
       } catch (e) {
         // 401 уже перевів на логін; інакше сервер недоступний — кажемо про це там же
         authed.value = false;
@@ -1045,6 +1186,7 @@ const app = createApp({
     });
 
     return { authed, busy, loading, saving, refreshing, manualRefresh, error, notice, view, onlyPending, loginForm,
+             account, passwordForm, ezbToken, monoToken, setupMissing, changePassword, saveEzbToken, registerWebhook,
              keys, selection, waitingAccounts, ezAccounts, accountSelection, accountNames,
              rules, ruleEdits, ruleQuery, filteredRules, accountMappings, accEdits,
              go, doLogin, doLogout, saveRule, saveAccount, updateRule, updateAccount, toggleAll,

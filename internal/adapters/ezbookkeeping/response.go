@@ -3,6 +3,7 @@ package ezbookkeeping
 import (
 	"context"
 	"encoding/json"
+	"ezbkTools/internal/app"
 	"fmt"
 	"io"
 	"net/http"
@@ -33,6 +34,15 @@ func (e *APIError) Error() string {
 		return fmt.Sprintf("ezbookkeeping %s: status %d, code %d: %s", e.Path, e.StatusCode, e.Code, e.Message)
 	}
 	return fmt.Sprintf("ezbookkeeping %s: status %d: %s", e.Path, e.StatusCode, e.Message)
+}
+
+// Is дає app впізнати відхилений токен, не знаючи про цей тип. Пробний запит
+// рахунків не має параметрів, тож 4xx (крім 429) може стосуватися лише токена.
+func (e *APIError) Is(target error) bool {
+	if target != app.ErrBadEzbToken {
+		return false
+	}
+	return e.StatusCode >= 400 && e.StatusCode < 500 && e.StatusCode != http.StatusTooManyRequests
 }
 
 // envelope — спільна оболонка для успіху й помилки ezBookkeeping.

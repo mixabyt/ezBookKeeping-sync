@@ -37,7 +37,8 @@ var (
 type MappingService struct {
 	categories CategoryRepository
 	accounts   AccountRepository
-	catalog    CategoryCatalog
+	users      UserRepository
+	ledgers    LedgerFactory
 	jobs       JobRepository
 	settings   SettingsRepository
 	waker      JobWaker
@@ -46,7 +47,8 @@ type MappingService struct {
 func NewMappingService(
 	categories CategoryRepository,
 	accounts AccountRepository,
-	catalog CategoryCatalog,
+	users UserRepository,
+	ledgers LedgerFactory,
 	jobs JobRepository,
 	settings SettingsRepository,
 	waker JobWaker,
@@ -54,24 +56,25 @@ func NewMappingService(
 	return &MappingService{
 		categories: categories,
 		accounts:   accounts,
-		catalog:    catalog,
+		users:      users,
+		ledgers:    ledgers,
 		jobs:       jobs,
 		settings:   settings,
 		waker:      waker,
 	}
 }
 
-func (s *MappingService) MappingMode(ctx context.Context) (domain.MappingMode, error) {
-	return s.settings.MappingMode(ctx)
+func (s *MappingService) MappingMode(ctx context.Context, userID int64) (domain.MappingMode, error) {
+	return s.settings.MappingMode(ctx, userID)
 }
 
 // SetMappingMode перемикає режим і будить воркер: джоби, що вже чекають,
 // перевіряються за новим режимом одразу, а не на наступному тіку.
-func (s *MappingService) SetMappingMode(ctx context.Context, mode domain.MappingMode) error {
+func (s *MappingService) SetMappingMode(ctx context.Context, userID int64, mode domain.MappingMode) error {
 	if !mode.Valid() {
 		return fmt.Errorf("%w: отримано %q", domain.ErrInvalidMode, mode)
 	}
-	if err := s.settings.SetMappingMode(ctx, mode); err != nil {
+	if err := s.settings.SetMappingMode(ctx, userID,mode); err != nil {
 		return err
 	}
 	s.waker.Wake()
@@ -81,8 +84,8 @@ func (s *MappingService) SetMappingMode(ctx context.Context, mode domain.Mapping
 // WaitingMerchants — продавці, на правило для яких чекають джоби (режим merchant).
 // Продавця, для якого категорія вже знаходиться (правило продавця або MCC), не
 // показуємо: його джоби чекають лише рахунок, і це видно в списку рахунків.
-func (s *MappingService) WaitingMerchants(ctx context.Context) ([]domain.WaitingMerchant, error) {
-	merchants, err := s.jobs.WaitingMerchants(ctx)
+func (s *MappingService) WaitingMerchants(ctx context.Context, userID int64) ([]domain.WaitingMerchant, error) {
+	merchants, err := s.jobs.WaitingMerchants(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -90,7 +93,7 @@ func (s *MappingService) WaitingMerchants(ctx context.Context) ([]domain.Waiting
 	result := make([]domain.WaitingMerchant, 0, len(merchants))
 	for _, m := range merchants {
 		tx := domain.BankTransaction{MCC: m.MCC, Description: m.Description, Amount: directionSign(m.Direction)}
-		suggestion, err := suggestCategory(ctx, s.categories, &tx, false)
+		suggestion, err := suggestCategory(ctx, userID,s.categories, &tx, false)
 		if err != nil {
 			return nil, err
 		}
@@ -113,21 +116,21 @@ func directionSign(direction domain.Direction) int64 {
 // CreateMerchantRule додає правило продавця. alsoForMCC — заразом правило на весь MCC
 // («для всього MCC 5818»): тоді решта продавців цього MCC теж підуть за ним.
 // queued — скільки джоб цього продавця чекало (з alsoForMCC — усіх джоб MCC).
-func (s *MappingService) CreateMerchantRule(ctx context.Context, rule domain.MerchantRule, alsoForMCC bool) (*domain.MerchantRule, int, error) {
+func (s *MappingService) CreateMerchantRule(ctx context.Context, userID int64, rule domain.MerchantRule, alsoForMCC bool) (*domain.MerchantRule, int, error) {
 	rule.Description = strings.TrimSpace(rule.Description)
 	rule.Enabled = true
 	if err := rule.Validate(); err != nil {
 		return nil, 0, err
 	}
 
-	created, err := s.categories.AddMerchantRule(ctx, rule)
+	created, err := s.categories.AddMerchantRule(ctx, userID,rule)
 	if err != nil {
 		return nil, 0, err
 	}
 
 	if alsoForMCC {
 		// CreateRule сам рахує queued по всьому MCC і будить воркер
-		_, queued, err := s.CreateRule(ctx, domain.MCCCategoryRule{
+		_, queued, err := s.CreateRule(ctx, userID,domain.MCCCategoryRule{
 			MCCFrom:       rule.MCC,
 			MCCTo:         rule.MCC,
 			Direction:     rule.Direction,
@@ -143,7 +146,7 @@ func (s *MappingService) CreateMerchantRule(ctx context.Context, rule domain.Mer
 	}
 
 	queued := 0
-	if merchants, err := s.jobs.WaitingMerchants(ctx); err == nil {
+	if merchants, err := s.jobs.WaitingMerchants(ctx, userID); err == nil {
 		for _, m := range merchants {
 			if m.MCC == created.MCC && m.Direction == created.Direction && m.Description == created.Description {
 				queued = m.WaitingJobs
@@ -154,16 +157,16 @@ func (s *MappingService) CreateMerchantRule(ctx context.Context, rule domain.Mer
 	return created, queued, nil
 }
 
-func (s *MappingService) MerchantRules(ctx context.Context) ([]domain.MerchantRule, error) {
-	return s.categories.ListMerchantRules(ctx)
+func (s *MappingService) MerchantRules(ctx context.Context, userID int64) ([]domain.MerchantRule, error) {
+	return s.categories.ListMerchantRules(ctx, userID)
 }
 
 // UpdateMerchantRule — інша категорія або увімкнути/вимкнути; будить воркер, як і UpdateRule.
-func (s *MappingService) UpdateMerchantRule(ctx context.Context, id int64, categoryID string, enabled bool) (*domain.MerchantRule, error) {
+func (s *MappingService) UpdateMerchantRule(ctx context.Context, userID int64, id int64, categoryID string, enabled bool) (*domain.MerchantRule, error) {
 	if categoryID == "" {
 		return nil, domain.ErrEmptyCategory
 	}
-	updated, err := s.categories.UpdateMerchantRule(ctx, id, categoryID, enabled)
+	updated, err := s.categories.UpdateMerchantRule(ctx, userID,id, categoryID, enabled)
 	if err != nil {
 		return nil, err
 	}
@@ -173,15 +176,15 @@ func (s *MappingService) UpdateMerchantRule(ctx context.Context, id int64, categ
 
 // ReviewQueue — транзакції на підтвердження з пропозицією категорії. Пропозиція
 // рахується щоразу заново: нове правило одразу змінює її для тих, що вже чекають.
-func (s *MappingService) ReviewQueue(ctx context.Context) ([]domain.ReviewItem, error) {
-	jobs, err := s.jobs.ListNeedsReview(ctx)
+func (s *MappingService) ReviewQueue(ctx context.Context, userID int64) ([]domain.ReviewItem, error) {
+	jobs, err := s.jobs.ListNeedsReview(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
 
 	items := make([]domain.ReviewItem, 0, len(jobs))
 	for _, job := range jobs {
-		suggestion, err := suggestCategory(ctx, s.categories, &job.Tx, true)
+		suggestion, err := suggestCategory(ctx, userID,s.categories, &job.Tx, true)
 		if err != nil {
 			return nil, err
 		}
@@ -192,11 +195,11 @@ func (s *MappingService) ReviewQueue(ctx context.Context) ([]domain.ReviewItem, 
 
 // ConfirmJob — людина погодила категорію (запропоновану чи свою): джоба
 // повертається в pending з нею, і воркер одразу відправляє її в ezBookkeeping.
-func (s *MappingService) ConfirmJob(ctx context.Context, id int64, categoryID string) error {
+func (s *MappingService) ConfirmJob(ctx context.Context, userID int64, id int64, categoryID string) error {
 	if categoryID == "" {
 		return domain.ErrEmptyCategory
 	}
-	if err := s.jobs.Confirm(ctx, id, categoryID); err != nil {
+	if err := s.jobs.Confirm(ctx, userID,id, categoryID); err != nil {
 		return err
 	}
 	s.waker.Wake()
@@ -206,7 +209,7 @@ func (s *MappingService) ConfirmJob(ctx context.Context, id int64, categoryID st
 // SkipJobs — людина «видалила» транзакції на підтвердженні: в ezBookkeeping вони не підуть.
 // Повертає, скільки реально пропущено і скільки різних id просили; різниця — ті,
 // що вже підтвердили з іншого пристрою. Воркер не будимо — відправляти нічого.
-func (s *MappingService) SkipJobs(ctx context.Context, ids []int64) (skipped, requested int, err error) {
+func (s *MappingService) SkipJobs(ctx context.Context, userID int64, ids []int64) (skipped, requested int, err error) {
 	unique := make([]int64, 0, len(ids))
 	seen := make(map[int64]bool, len(ids))
 	for _, id := range ids {
@@ -222,7 +225,7 @@ func (s *MappingService) SkipJobs(ctx context.Context, ids []int64) (skipped, re
 		return 0, 0, ErrTooManyJobs
 	}
 
-	n, err := s.jobs.Skip(ctx, unique)
+	n, err := s.jobs.Skip(ctx, userID,unique)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -235,8 +238,12 @@ func (s *MappingService) SkipJobs(ctx context.Context, ids []int64) (skipped, re
 // EzCategories — довідник категорій ezBookkeeping для випадайки в UI.
 // Приховані категорії за замовчуванням не віддаємо: пропонувати до вибору те,
 // що людина свідомо сховала в ezBookkeeping, сенсу немає.
-func (s *MappingService) EzCategories(ctx context.Context, filter domain.EzCategoryFilter) ([]domain.EzCategory, error) {
-	all, err := s.catalog.Categories(ctx)
+func (s *MappingService) EzCategories(ctx context.Context, userID int64, filter domain.EzCategoryFilter) ([]domain.EzCategory, error) {
+	ledger, err := ledgerForUser(ctx, userID, s.users, s.ledgers)
+	if err != nil {
+		return nil, err
+	}
+	all, err := ledger.Categories(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -255,8 +262,12 @@ func (s *MappingService) EzCategories(ctx context.Context, filter domain.EzCateg
 }
 
 // EzAccounts — довідник рахунків ezBookkeeping, приховані відкидаємо з тієї ж причини.
-func (s *MappingService) EzAccounts(ctx context.Context) ([]domain.EzAccount, error) {
-	all, err := s.catalog.Accounts(ctx)
+func (s *MappingService) EzAccounts(ctx context.Context, userID int64) ([]domain.EzAccount, error) {
+	ledger, err := ledgerForUser(ctx, userID, s.users, s.ledgers)
+	if err != nil {
+		return nil, err
+	}
+	all, err := ledger.Accounts(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -280,7 +291,7 @@ const defaultRulePriority = 100
 // CreateRule додає правило MCC → категорія і будить воркер.
 // queued — скільки джоб чекало саме на це правило; вони перевіряються повторно,
 // але рушать далі лише якщо для них уже є й мапінг рахунку.
-func (s *MappingService) CreateRule(ctx context.Context, rule domain.MCCCategoryRule) (*domain.MCCCategoryRule, int, error) {
+func (s *MappingService) CreateRule(ctx context.Context, userID int64, rule domain.MCCCategoryRule) (*domain.MCCCategoryRule, int, error) {
 	if rule.Priority <= 0 {
 		rule.Priority = defaultRulePriority
 	}
@@ -288,37 +299,37 @@ func (s *MappingService) CreateRule(ctx context.Context, rule domain.MCCCategory
 		return nil, 0, err
 	}
 
-	created, err := s.categories.AddRule(ctx, rule)
+	created, err := s.categories.AddRule(ctx, userID,rule)
 	if err != nil {
 		return nil, 0, err
 	}
 
-	queued := s.queuedForRule(ctx, created)
+	queued := s.queuedForRule(ctx, userID,created)
 	s.waker.Wake()
 	return created, queued, nil
 }
 
 // Rules — усі правила MCC → категорія, разом з вимкненими: їх теж можна редагувати.
-func (s *MappingService) Rules(ctx context.Context) ([]domain.MCCCategoryRule, error) {
-	return s.categories.ListRules(ctx)
+func (s *MappingService) Rules(ctx context.Context, userID int64) ([]domain.MCCCategoryRule, error) {
+	return s.categories.ListRules(ctx, userID)
 }
 
 // UpdateRule змінює категорію / enabled / нотатку правила і будить воркер:
 // увімкнене правило могло розблокувати джоби. Уже записані в ezBookkeeping
 // транзакції не переписуються.
-func (s *MappingService) UpdateRule(ctx context.Context, id int64, categoryID string, enabled bool, note string) (*domain.MCCCategoryRule, int, error) {
+func (s *MappingService) UpdateRule(ctx context.Context, userID int64, id int64, categoryID string, enabled bool, note string) (*domain.MCCCategoryRule, int, error) {
 	if categoryID == "" {
 		return nil, 0, domain.ErrEmptyCategory
 	}
 
-	updated, err := s.categories.UpdateRule(ctx, id, categoryID, enabled, note)
+	updated, err := s.categories.UpdateRule(ctx, userID,id, categoryID, enabled, note)
 	if err != nil {
 		return nil, 0, err
 	}
 
 	queued := 0
 	if updated.Enabled {
-		queued = s.queuedForRule(ctx, updated)
+		queued = s.queuedForRule(ctx, userID,updated)
 	}
 	s.waker.Wake()
 	return updated, queued, nil
@@ -326,8 +337,8 @@ func (s *MappingService) UpdateRule(ctx context.Context, id int64, categoryID st
 
 // queuedForRule — скільки джоб, що чекають, підпадає під правило.
 // Лічильник лише для UI; правило вже збережено, тому його помилку не віддаємо.
-func (s *MappingService) queuedForRule(ctx context.Context, rule *domain.MCCCategoryRule) int {
-	counts, err := s.jobs.WaitingCounts(ctx)
+func (s *MappingService) queuedForRule(ctx context.Context, userID int64, rule *domain.MCCCategoryRule) int {
+	counts, err := s.jobs.WaitingCounts(ctx, userID)
 	if err != nil {
 		return 0
 	}
@@ -341,23 +352,23 @@ func (s *MappingService) queuedForRule(ctx context.Context, rule *domain.MCCCate
 }
 
 // AccountMappings — усі збережені мапінги банківських рахунків.
-func (s *MappingService) AccountMappings(ctx context.Context) ([]domain.AccountMapping, error) {
-	return s.accounts.ListMappings(ctx)
+func (s *MappingService) AccountMappings(ctx context.Context, userID int64) ([]domain.AccountMapping, error) {
+	return s.accounts.ListMappings(ctx, userID)
 }
 
 // UnmappedKeys — ключі, які зустрічались у транзакціях без мапінгу,
 // найчастіші першими, з кількістю транзакцій, які вони зараз блокують.
-func (s *MappingService) UnmappedKeys(ctx context.Context, filter domain.UnmappedFilter) ([]domain.UnmappedKey, error) {
+func (s *MappingService) UnmappedKeys(ctx context.Context, userID int64, filter domain.UnmappedFilter) ([]domain.UnmappedKey, error) {
 	if filter.Limit <= 0 || filter.Limit > maxUnmappedLimit {
 		filter.Limit = maxUnmappedLimit
 	}
 
-	keys, err := s.categories.ListUnmapped(ctx, filter)
+	keys, err := s.categories.ListUnmapped(ctx, userID,filter)
 	if err != nil {
 		return nil, err
 	}
 
-	counts, err := s.jobs.WaitingCounts(ctx)
+	counts, err := s.jobs.WaitingCounts(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -376,7 +387,7 @@ func (s *MappingService) UnmappedKeys(ctx context.Context, filter domain.Unmappe
 	}
 
 	if filter.KeyType == "" || filter.KeyType == domain.KeyMCC {
-		missing, err := s.waitingWithoutHistory(ctx, seen)
+		missing, err := s.waitingWithoutHistory(ctx, userID,seen)
 		if err != nil {
 			return nil, err
 		}
@@ -389,8 +400,8 @@ func (s *MappingService) UnmappedKeys(ctx context.Context, filter domain.Unmappe
 // waitingWithoutHistory — MCC, на які чекають джоби, але яких немає в unmapped_keys.
 // Ключ туди пишеться лише при першому переході pending → waiting у режимі mcc;
 // джоба, що чекала в іншому режимі, після перемикання на mcc інакше була б невидимою.
-func (s *MappingService) waitingWithoutHistory(ctx context.Context, seen map[domain.WaitingKey]bool) ([]domain.UnmappedKey, error) {
-	merchants, err := s.jobs.WaitingMerchants(ctx)
+func (s *MappingService) waitingWithoutHistory(ctx context.Context, userID int64, seen map[domain.WaitingKey]bool) ([]domain.UnmappedKey, error) {
+	merchants, err := s.jobs.WaitingMerchants(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -408,7 +419,7 @@ func (s *MappingService) waitingWithoutHistory(ctx context.Context, seen map[dom
 			continue
 		}
 		// джоба може чекати лише рахунок — тоді правило є і ключ не борг
-		rule, err := s.categories.EzCategoryRuleByMCC(ctx, m.MCC, m.Direction)
+		rule, err := s.categories.EzCategoryRuleByMCC(ctx, userID,m.MCC, m.Direction)
 		if err != nil {
 			return nil, err
 		}
@@ -432,12 +443,12 @@ func (s *MappingService) waitingWithoutHistory(ctx context.Context, seen map[dom
 // WaitingAccounts — банківські рахунки, через які стоять джоби, і для яких мапінгу досі немає.
 // Рахунок із мапінгом тут не показуємо, навіть якщо його джоби чекають: вони чекають
 // категорію, і це видно в списку MCC.
-func (s *MappingService) WaitingAccounts(ctx context.Context) ([]domain.WaitingAccount, error) {
-	waiting, err := s.jobs.WaitingAccounts(ctx)
+func (s *MappingService) WaitingAccounts(ctx context.Context, userID int64) ([]domain.WaitingAccount, error) {
+	waiting, err := s.jobs.WaitingAccounts(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
-	mappings, err := s.accounts.ListMappings(ctx)
+	mappings, err := s.accounts.ListMappings(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -458,16 +469,16 @@ func (s *MappingService) WaitingAccounts(ctx context.Context) ([]domain.WaitingA
 
 // CreateAccountMapping задає (або виправляє) рахунок ezBookkeeping для банківського
 // рахунку і будить воркер. queued — скільки джоб із цього рахунку чекало.
-func (s *MappingService) CreateAccountMapping(ctx context.Context, mapping domain.AccountMapping) (int, error) {
+func (s *MappingService) CreateAccountMapping(ctx context.Context, userID int64, mapping domain.AccountMapping) (int, error) {
 	if err := mapping.Validate(); err != nil {
 		return 0, err
 	}
-	if err := s.accounts.AddMapping(ctx, mapping); err != nil {
+	if err := s.accounts.AddMapping(ctx, userID,mapping); err != nil {
 		return 0, err
 	}
 
 	queued := 0
-	if waiting, err := s.jobs.WaitingAccounts(ctx); err == nil {
+	if waiting, err := s.jobs.WaitingAccounts(ctx, userID); err == nil {
 		for _, w := range waiting {
 			if w.Source == mapping.Source && w.BankAccountID == mapping.BankAccountID {
 				queued = w.WaitingJobs

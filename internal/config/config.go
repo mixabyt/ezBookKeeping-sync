@@ -15,7 +15,11 @@ type Config struct {
 	MonobankApiKey string `env:"MONOBANK_API_KEY"`
 	// MonoSpoolURL — черга вебхуків на VPS, які прийшли, поки сервер лежав; порожньо — не забирати.
 	MonoSpoolURL string `env:"MONO_SPOOL_URL"`
+	// MonoWebhookBaseURL — публічна адреса вебхука без токена, напр. https://example.com/mono-webhook.
+	// Із запиту її не вивести: PWA і вебхук можуть ходити різними шляхами.
+	MonoWebhookBaseURL string `env:"MONO_WEBHOOK_BASE_URL"`
 
+	// EzBookKeepingKey — лише для першого старту: заповнює рядок власника, далі токени живуть у БД.
 	EzBookKeepingKey     string `env:"EZ_BOOK_KEEPING_KEY"`
 	EzBookKeepingBaseURL string `env:"EZ_BOOK_KEEPING_BASE_URL"`
 
@@ -26,7 +30,8 @@ type Config struct {
 	GinMode  string `env:"GIN_MODE" envDefault:"debug"`
 	LogLevel string `env:"LOG_LEVEL" envDefault:"info"`
 
-	// Авторизація PWA: логін, bcrypt-хеш пароля (cmd/hashpw) і секрет для підпису токена.
+	// AuthLogin і AuthPasswordHash (cmd/hashpw) — лише для першого старту, далі логін і пароль у БД.
+	// AuthSecret — секрет для підпису токена сесії, потрібен завжди.
 	AuthLogin        string `env:"AUTH_LOGIN"`
 	AuthPasswordHash string `env:"AUTH_PASSWORD_HASH"`
 	AuthSecret       string `env:"AUTH_SECRET"`
@@ -48,6 +53,7 @@ func NewConfig() *Config {
 	return &Config{
 		MonobankApiKey:       os.Getenv("MONOBANK_API_KEY"),
 		MonoSpoolURL:         os.Getenv("MONO_SPOOL_URL"),
+		MonoWebhookBaseURL:   os.Getenv("MONO_WEBHOOK_BASE_URL"),
 		EzBookKeepingKey:     os.Getenv("EZ_BOOK_KEEPING_KEY"),
 		EzBookKeepingBaseURL: os.Getenv("EZ_BOOK_KEEPING_BASE_URL"),
 		DBDatabase:           os.Getenv("DB_DATABASE"),

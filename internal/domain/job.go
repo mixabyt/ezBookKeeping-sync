@@ -13,7 +13,7 @@ const (
 	JobDone        JobStatus = "done"
 	JobFailed      JobStatus = "failed"
 	// JobSkipped — людина «видалила» транзакцію: в ezBookkeeping вона не піде.
-	// Рядок лишається навмисно — UNIQUE (source, tx_id) не дасть повтору вебхука створити її знову.
+	// Рядок лишається навмисно — UNIQUE (user_id, source, tx_id) не дасть повтору вебхука створити її знову.
 	JobSkipped JobStatus = "skipped"
 )
 
@@ -26,6 +26,7 @@ type WaitingKey struct {
 
 type Job struct {
 	ID        int64
+	UserID    int64
 	Tx        BankTransaction
 	Status    JobStatus
 	Attempts  int

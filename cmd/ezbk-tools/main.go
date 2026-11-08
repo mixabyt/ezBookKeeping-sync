@@ -5,6 +5,7 @@ import (
 	"errors"
 	"ezbkTools/internal/adapters/ezbookkeeping"
 	"ezbkTools/internal/adapters/httpapi"
+	"ezbkTools/internal/adapters/monobank"
 	"ezbkTools/internal/adapters/spool"
 	"ezbkTools/internal/adapters/sqlite"
 	"ezbkTools/internal/app"
@@ -15,7 +16,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -26,6 +26,11 @@ import (
 )
 
 func main() {
+	// підкоманди виконуються і завершуються, сервер запускається лише без аргументів
+	if len(os.Args) > 1 {
+		os.Exit(runCommand(os.Args[1:]))
+	}
+
 	cfg := config.NewConfig()
 	gin.SetMode(cfg.GinMode)
 	logger, cleanup, err := initLogger(cfg.LogLevel == "debug")
@@ -47,19 +52,28 @@ func main() {
 	categories := sqlite.NewCategory(db)
 	accounts := sqlite.NewAccount(db)
 	settings := sqlite.NewSettings(db)
+	users := sqlite.NewUser(db)
 
-	ezClient := ezbookkeeping.NewEzBookkeepingClient(cfg.EzBookKeepingKey, cfg.EzBookKeepingBaseURL)
+	// Рядок власника порожній лише після міграції 000009; далі дані з .env не читаються.
+	if err := app.BootstrapOwner(context.Background(), users, cfg.AuthLogin, cfg.AuthPasswordHash, cfg.EzBookKeepingKey); err != nil {
+		logger.Error("bootstrap owner error", "err", err)
+		_ = db.Close()
+		cleanup()
+		os.Exit(1)
+	}
 
-	syncService := app.NewSyncService(jobs, ezClient, categories, accounts, settings)
+	ezFactory := ezbookkeeping.NewFactory(cfg.EzBookKeepingBaseURL)
+	ledgers := func(token string) app.Ledger { return ezFactory.Client(token) }
+
+	syncService := app.NewSyncService(jobs, users, ledgers, categories, accounts, settings)
 	worker := app.NewWorker(jobs, syncService)
 
 	// syncService — він же JobWaker: після нового мапінгу будить воркер
-	mappingService := app.NewMappingService(categories, accounts, ezClient, jobs, settings, syncService)
+	mappingService := app.NewMappingService(categories, accounts, users, ledgers, jobs, settings, syncService)
+	userService := app.NewUserService(users, ledgers, monobank.NewWebhookRegistrar(), syncService, cfg.MonoWebhookBaseURL)
 
-	srv := httpapi.NewServer(syncService, mappingService, httpapi.AuthConfig{
-		Login:        cfg.AuthLogin,
-		PasswordHash: cfg.AuthPasswordHash,
-		Secret:       cfg.AuthSecret,
+	srv := httpapi.NewServer(syncService, mappingService, userService, httpapi.AuthConfig{
+		Secret: cfg.AuthSecret,
 	})
 
 	httpSrv := &http.Server{
@@ -155,10 +169,12 @@ const spoolInterval = 5 * time.Minute
 // Тут, а не в адаптері: spool і httpapi не мають знати одне про одного.
 func monoSpoolHandler(srv *httpapi.Server) spool.Handler {
 	return func(ctx context.Context, req spool.Request) error {
-		if req.Method != http.MethodPost || strings.SplitN(req.URI, "?", 2)[0] != "/mono-webhook" {
-			return fmt.Errorf("%w: unexpected %s %s", spool.ErrDiscard, req.Method, req.URI)
+		webhookToken, ok := httpapi.ParseMonoWebhookURI(req.URI)
+		if req.Method != http.MethodPost || !ok {
+			// без req.URI у тексті: у ньому може бути секретний токен вебхука
+			return fmt.Errorf("%w: unexpected %s request", spool.ErrDiscard, req.Method)
 		}
-		err := srv.ReplayMonoWebhook(ctx, req.Header(), []byte(req.Body))
+		err := srv.ReplayMonoWebhook(ctx, webhookToken, req.Header(), []byte(req.Body))
 		if errors.Is(err, httpapi.ErrInvalidWebhook) {
 			return fmt.Errorf("%w: %w", spool.ErrDiscard, err)
 		}

@@ -20,6 +20,7 @@ type Server struct {
 	router         *gin.Engine
 	syncService    *app.SyncService
 	mappingService *app.MappingService
+	users          *app.UserService
 	auth           AuthConfig
 	attempts       *cache.Cache
 }
@@ -28,11 +29,12 @@ func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	s.router.ServeHTTP(writer, request)
 }
 
-func NewServer(syncService *app.SyncService, mappingService *app.MappingService, auth AuthConfig) *Server {
+func NewServer(syncService *app.SyncService, mappingService *app.MappingService, users *app.UserService, auth AuthConfig) *Server {
 	s := &Server{
 		router:         gin.Default(),
 		syncService:    syncService,
 		mappingService: mappingService,
+		users:          users,
 		auth:           auth,
 		attempts:       cache.New(loginWindow, loginWindow),
 	}
@@ -58,18 +60,29 @@ func (s *Server) failedLogin(ip string) {
 func (s *Server) init() {
 	s.router.Use(requestid.New())
 
-	s.router.GET("/mono-webhook", s.registerWebHook())
-	s.router.POST("/mono-webhook", s.checkMonoSign(), s.monoWebHook())
+	// Один маршрут на всіх: користувача знаходимо за токеном під час запиту,
+	// тож новий користувач запрацює без рестарту і без динамічної реєстрації роутів.
+	// GET потрібен банку: при реєстрації він перевіряє адресу запитом.
+	s.router.GET(monoWebhookPath+"/:token", s.webhookUserByToken(), s.registerWebHook())
+	s.router.POST(monoWebhookPath+"/:token", s.webhookUserByToken(), s.checkMonoSign(), s.monoWebHook())
+
+	// Адреса без токена — вебхук власника, зареєстрований до появи кількох користувачів.
+	s.router.GET(monoWebhookPath, s.webhookOwner(), s.registerWebHook())
+	s.router.POST(monoWebhookPath, s.webhookOwner(), s.checkMonoSign(), s.monoWebHook())
 
 	// API для PWA: вхід відкритий, решта — лише з валідним токеном
 	api := s.router.Group("/api")
 	api.POST("/login", s.login())
 	api.POST("/logout", s.logout())
 
-	secured := api.Group("", s.requireAuth())
-	secured.GET("/me", func(c *gin.Context) {
-		s.respondOK(c, gin.H{"login": c.GetString("login")})
-	})
+	session := api.Group("", s.requireAuth())
+	session.GET("/me", s.me())
+	session.POST("/change-password", s.changePassword())
+
+	// усе нижче закрите, поки людина не змінить тимчасовий пароль
+	secured := session.Group("", s.requirePasswordChanged())
+	secured.PUT("/ezb-token", s.putEzbToken())
+	secured.POST("/mono/webhook", s.registerMonoWebhook())
 	secured.GET("/unmapped", s.unmappedKeys())
 	secured.GET("/rules", s.listRules())
 	secured.POST("/rules", s.createRule())

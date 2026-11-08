@@ -56,14 +56,25 @@ var (
 	deleteUserCustomExchangeRate = "/exchange_rates/user_custom/delete.json"
 )
 
-func NewEzBookkeepingClient(token, baseUrl string) *Client {
-	return &Client{
+// Factory створює клієнтів для різних користувачів: адреса сервера і http.Client
+// (а з ним і пул зʼєднань) спільні, відрізняється лише токен.
+type Factory struct {
+	baseUrl    string
+	httpClient *http.Client
+}
+
+func NewFactory(baseUrl string) *Factory {
+	return &Factory{
 		baseUrl: baseUrl,
-		token:   token,
 		httpClient: &http.Client{
 			Timeout: baseDelay,
 		},
 	}
+}
+
+// Client — клієнт, що ходить в ezBookkeeping від імені власника токена.
+func (f *Factory) Client(token string) *Client {
+	return &Client{baseUrl: f.baseUrl, token: token, httpClient: f.httpClient}
 }
 
 func (c *Client) AddTransaction(ctx context.Context, tx *domain.BankTransaction, categoryID, accountID string) error {
